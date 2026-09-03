@@ -750,7 +750,7 @@ Add database-backed tests for:
 
 ### Source control
 
-During the initial orientation, all backend project files appeared untracked in Git. Before material development, verify repository initialization, ignore rules, commit history, and the intended branch. Never assume untracked files are disposable.
+The backend now has an audited local Git baseline on `main`, beginning with commit `b692448` (`Initial school management backend`). The real `.env`, virtual environments, bytecode, logs, media, and local runtime artifacts are ignored. No remote is configured yet; do not attach or push to the separate `hopeful-future-website_backend` repository, which belongs to another project for the same school. Configure a remote only when the dedicated SMS-backend repository is known and explicitly approved.
 
 ## Development Guidelines
 
@@ -839,10 +839,12 @@ Documentation-only wording corrections do not require artificial changes to both
 At the time of the initial read-only review:
 
 - `python manage.py check` passed with no issues.
-- `python manage.py makemigrations --check --dry-run` reported no model changes, though database migration-history verification could not connect to MySQL.
+- Docker Compose successfully built and started the declared web, MySQL, and Redis services; MySQL and Redis reported healthy.
+- All committed migrations were applied, and `python manage.py makemigrations --check --dry-run` reported no model changes.
 - All 18 tests in `apps.results.tests.test_services` passed.
-- Docker runtime status could not be inspected because the shell lacked access to the Docker socket.
-- No database-backed or full end-to-end verification was completed.
+- The full discovered backend suite also contained only those same 18 pure service tests; database-backed API/workflow coverage remains absent.
+- OpenAPI generation completed with seven unique schema problems affecting APIViews, notification schema inspection, serializer method types, and enum naming.
+- The audited local Git baseline is commit `b692448`; no remote is configured.
 
 Re-run these checks after changes; this section is historical context, not a substitute for current validation.
 
