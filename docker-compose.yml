@@ -1,0 +1,64 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-hfss}
+      MYSQL_USER: ${DB_USER:-hfss}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-hfss}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-hfss_root}
+    ports:
+      # Host-side port only, for external tools (mysql CLI, GUI clients).
+      # Remapped off the default 3306 because this machine already runs a
+      # native MySQL server on that port. The `web` container always talks
+      # to this one over the internal Docker network as `mysql:3306`
+      # (see DB_HOST/DB_PORT in .env), so this remap doesn't affect it.
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-hfss_root}"]
+      # First-time initialization (system tablespace + InnoDB bootstrap) has
+      # been observed taking several minutes on this host's Docker install
+      # (slow container-filesystem I/O, not a hang — CPU usage stays low but
+      # nonzero throughout). Only the very first `docker compose up` after a
+      # fresh volume pays this cost; subsequent starts are fast. Generous
+      # budget here so `depends_on: condition: service_healthy` doesn't give
+      # up on `web` prematurely.
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      # Same reasoning as mysql above — a native redis-server already owns
+      # 6379 on this machine. `web` still reaches this over the internal
+      # Docker network as `redis:6379`.
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    restart: unless-stopped
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:

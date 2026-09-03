@@ -1,0 +1,16 @@
+# Used only for local (non-Docker) development on this machine, where the
+# system headers needed to compile mysqlclient aren't installed and we don't
+# have sudo. PyMySQL is pure-Python and shimmed in as MySQLdb (see
+# config/settings.py). The Docker image always uses real mysqlclient from
+# requirements.txt — this file is never used inside the container.
+Django>=5.0,<5.1
+djangorestframework>=3.15,<3.16
+djangorestframework-simplejwt>=5.3,<5.4
+django-cors-headers>=4.3,<4.4
+django-redis>=5.4,<5.5
+django-filter>=24.2,<24.3
+drf-spectacular>=0.27,<0.28
+celery>=5.4,<5.5
+redis>=5.0,<6.0
+PyMySQL>=1.1,<1.2
+python-dotenv>=1.0,<1.1
