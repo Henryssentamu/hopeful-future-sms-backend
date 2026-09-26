@@ -15,6 +15,15 @@ class TeacherSerializer(serializers.ModelSerializer):
         fields = ["id", "user", "name", "email", "attendance", "performance", "phone", "status", "join_date"]
 
 
+class TeacherDirectorySerializer(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(source="user.id", read_only=True)
+    name = serializers.CharField(source="user.get_full_name", read_only=True)
+
+    class Meta:
+        model = Teacher
+        fields = ["id", "user_id", "name"]
+
+
 class NonTeachingStaffSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     name = serializers.CharField(source="user.get_full_name", read_only=True)
@@ -28,7 +37,8 @@ class NonTeachingStaffSerializer(serializers.ModelSerializer):
 class RecruitmentRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = RecruitmentRecord
-        fields = ["id", "candidate_name", "staff_type", "role", "email", "phone", "applied_date", "status", "notes"]
+        fields = ["id", "candidate_name", "staff_type", "role", "email", "phone", "applied_date", "status", "notes", "hired_user"]
+        read_only_fields = ["hired_user"]
 
     def validate_status(self, value):
         # Pending <-> Rejected is a plain status flip, fine via PATCH. Hired

@@ -1,0 +1,74 @@
+# Standalone file: do not merge with the development docker-compose.yml.
+# Requires separately provisioned MySQL, Redis, and a host TLS reverse proxy.
+name: hopeful-future-sms-production
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    restart: unless-stopped
+    env_file:
+      - ${PRODUCTION_ENV_FILE:?Set PRODUCTION_ENV_FILE to a real production environment file}
+    environment:
+      DJANGO_ENVIRONMENT: production
+      DJANGO_DEBUG: "False"
+    ports:
+      - "127.0.0.1:8001:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    volumes:
+      - media:/app/media
+    healthcheck:
+      test: ["CMD", "python", "-m", "config.healthcheck"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    restart: unless-stopped
+    env_file:
+      - ${PRODUCTION_ENV_FILE:?Set PRODUCTION_ENV_FILE to a real production environment file}
+    environment:
+      DJANGO_ENVIRONMENT: production
+      DJANGO_DEBUG: "False"
+      CELERY_TASK_ALWAYS_EAGER: "False"
+    command: ["celery", "-A", "config", "worker", "--loglevel=WARNING", "--concurrency=2", "--hostname=worker@%h"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping --destination worker@$$HOSTNAME --timeout 5"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  media:

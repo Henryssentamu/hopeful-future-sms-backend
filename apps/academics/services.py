@@ -6,7 +6,25 @@ here they're plain ORM operations against the real tables, but the
 derivation by scanning rather than a stored field) is preserved exactly.
 """
 
+from django.db import models, transaction
+
+from apps.staff.models import Teacher
+
 from .models import AssignmentType, ClassSubjectAssignment, Department, SchoolClass, TeacherAssignment
+
+
+@transaction.atomic
+def reassign_class_teacher(target_class: SchoolClass, teacher: Teacher) -> SchoolClass:
+    """Make one class the teacher's sole class-teacher responsibility atomically."""
+    Teacher.objects.select_for_update().get(pk=teacher.pk)
+    locked_classes = SchoolClass.objects.select_for_update().filter(
+        models.Q(pk=target_class.pk) | models.Q(class_teacher_id=teacher.pk)
+    )
+    list(locked_classes)
+    SchoolClass.objects.filter(class_teacher_id=teacher.pk).exclude(pk=target_class.pk).update(class_teacher=None)
+    target_class.class_teacher = teacher
+    target_class.save(update_fields=["class_teacher"])
+    return target_class
 
 
 def assign_teacher_to_class_subject(

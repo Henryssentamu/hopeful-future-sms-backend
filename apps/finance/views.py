@@ -43,8 +43,6 @@ from .services import (
 
 class ReadAllWriteBursarOrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
-        if request.method in permissions.SAFE_METHODS:
-            return bool(request.user and request.user.is_authenticated)
         return IsBursarOrAdmin().has_permission(request, view)
 
 
@@ -117,7 +115,7 @@ class StudentFeeStatusView(APIView):
     paid, balance, status, and the previous term's outstanding balance.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsBursarOrAdmin]
 
     def get(self, request):
         term = request.query_params.get("term", FinanceTerm.TERM_1)
@@ -167,7 +165,7 @@ class FinanceOverviewView(APIView):
     real term/year columns — see finance/services.py.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsBursarOrAdmin]
 
     def get(self, request):
         term = request.query_params.get("term", FinanceTerm.TERM_1)
@@ -199,7 +197,7 @@ class StudentRequirementStatusView(APIView):
     Read-only, computed — port of Accounts.tsx's RequirementsTab rows.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsBursarOrAdmin]
 
     def get(self, request):
         term = request.query_params.get("term", FinanceTerm.TERM_1)

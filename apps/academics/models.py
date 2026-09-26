@@ -181,5 +181,10 @@ class ResultWindow(models.Model):
     opens_at = models.DateTimeField()
     closes_at = models.DateTimeField()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["result_type", "term", "year"], name="unique_result_window_scope"),
+        ]
+
     def __str__(self):
         return f"{self.result_type} — {self.term} {self.year}"

@@ -110,7 +110,7 @@ Django URL/router
     -> MySQL
 ```
 
-Redis is configured for Django caching and as the Celery broker/result backend. Celery is currently scaffolding: eager execution is enabled by default, Docker Compose does not start a worker, and result processing is synchronous.
+Redis is the default cache and Celery broker/result backend. Namecheap shared hosting explicitly selects the shared SQL cache instead. Celery remains eager by default; the VPS production Compose file provides an optional worker profile. Result processing stays synchronous.
 
 ## Technology Stack
 
@@ -170,6 +170,7 @@ Keep multi-model workflows and calculations in services rather than duplicating 
 
 The main configuration is `config/settings.py`.
 
+- Environment profile: `DJANGO_ENVIRONMENT` is `development`, `test`, or `production`; it defaults to `development` so the existing local workflow remains available.
 - Custom user model: `accounts.User`.
 - Default API authentication: JWT.
 - Default permission: authenticated users only.
@@ -181,9 +182,10 @@ The main configuration is `config/settings.py`.
 - Database: MySQL only; there is no SQLite fallback.
 - Default frontend CORS origin: `http://localhost:8080`.
 - Redis logical database 1 is used for cache; database 0 is used for Celery.
-- Media is served by Django only while `DEBUG` is enabled.
+- Login and token-refresh throttles use the shared Redis-backed Django cache. Their rates and trusted-proxy count are configured through the authentication variables in `.env.example`.
+- Production enables SSL redirect, secure session/CSRF cookies, content-type protection, same-origin referrer/opener policy, frame denial, and configured HSTS. Media is served by Django only while `DEBUG` is enabled.
 
-Environment variables are documented in `.env.example`. Never expose or commit real `.env` contents.
+Local environment values are documented in `.env.example`; the deliberately non-deployable production checklist is `production.env.example`. Never expose or commit real environment values.
 
 Docker Compose defines MySQL, Redis, and the Django development server. It maps MySQL to host port 3307 and Redis to 6380 while containers communicate internally on their default ports. The web container currently runs Django's development server, not a production WSGI/ASGI server.
 
@@ -210,6 +212,8 @@ JWT endpoints:
 - `GET /api/auth/me/`
 
 Login returns `access`, `refresh`, and a serialized `user`. JWT access tokens also contain role and display-name claims.
+
+Login requests are limited independently by trusted source IP and by a SHA-256 digest of the submitted username. Refresh requests have a separate source-IP limit. Throttled requests return HTTP 429 with DRF's `detail` and `Retry-After` guidance; successful authentication payloads are unchanged.
 
 The permission base class treats Headmaster as having the same full-system access as Administrator wherever Administrator is allowed. Superusers bypass role checks.
 
@@ -242,9 +246,15 @@ The following sections describe what each Django app owns, how its files coopera
 
 **Views and routes (`views.py`, `urls.py`):**
 
-- `LoginView` handles credential authentication at `POST /api/auth/login/`.
-- SimpleJWT's refresh view is mounted at `POST /api/auth/refresh/`.
+- `LoginView` handles credential authentication at `POST /api/auth/login/` and applies both source-IP and submitted-username throttles.
+- `RefreshView` preserves SimpleJWT refresh behavior at `POST /api/auth/refresh/` and applies its own source-IP throttle.
 - `MeView` returns the authenticated user at `GET /api/auth/me/`.
+
+**Throttles (`throttles.py`):**
+
+- `LoginIPThrottle` limits aggregate login traffic from one trusted client address.
+- `LoginUsernameThrottle` limits requests against one submitted username across source addresses and stores only a digest in its cache key.
+- `TokenRefreshIPThrottle` gives refresh traffic an independent limit.
 
 **Permissions (`permissions.py`):**
 
@@ -335,6 +345,7 @@ The following sections describe what each Django app owns, how its files coopera
 
 **Services:**
 
+- `reassign_class_teacher()` locks the teacher and every affected class, clears any previous class-teacher responsibility, and assigns the target class inside one transaction.
 - `assign_teacher_to_class_subject()` creates/updates the class-subject and merges paper responsibility idempotently.
 - `remove_teacher_from_class_subject()` removes a teacher's complete assignment for that subject/class.
 - Role helpers derive subject-teacher, class-teacher, and department-head responsibilities rather than storing duplicate labels.
@@ -342,6 +353,8 @@ The following sections describe what each Django app owns, how its files coopera
 **Cross-app connections:** Teacher references come from staff. Students belong to SchoolClass and enroll in Subjects/Papers. ResultUpload scopes are built from class, subject, and paper. Finance uses `level_group` for fees/requirements. Timetable slots use classes, subjects, and teachers.
 
 **Change cautions:** Validate that paper labels belong to the chosen subject and teacher allocation. Deleting protected curriculum records may affect students/results. ResultWindow currently is not enforced by result submission. `students_enrolled` is cached and can drift unless its update policy is centralized.
+
+Class-teacher reassignment is exposed as `POST /api/academics/classes/{target_class_id}/reassign-class-teacher/` with `teacher_id`. HR/Admin/Headmaster/DOS use this action so removing the previous class and assigning the target succeed or roll back together. Clients must not reproduce this workflow with multiple class PATCH requests.
 
 ### `apps.students` — learner records, guardians, enrollment history, attendance, and stored academic summaries
 
@@ -548,7 +561,7 @@ Do not reintroduce duplicated teacher/class/subject arrays on Teacher or Subject
 
 `ReportCardConfig` controls assessment categories included in report cards for a term/year. Absence of a configuration means all result types count.
 
-`ResultWindow` stores opening and closing timestamps for a result category, term, and year. Current submission code does not enforce these timestamps; this is a known gap.
+`ResultWindow` stores one unique opening/closing interval for a result category, term, and year. Teacher submissions are rejected unless the matching window is currently open; the DOS/Admin/Headmaster enter-and-confirm recovery path deliberately bypasses the window.
 
 ### Students
 
@@ -624,7 +637,7 @@ UGX values are stored as positive integers, which assumes whole-shilling account
 
 A timetable configuration contains days, rooms, ordered periods, and slots. Slots may represent lessons or breaks.
 
-Serializer validation calls `find_conflicts()` to detect a teacher, room, or class used more than once in the same configuration/day/period. There is no automatic timetable generator. Conflict checking is currently application-level and is vulnerable to concurrent-create races.
+Serializer validation calls `find_conflicts()` to detect a teacher, room, or class used more than once in the same configuration/day/period. Writes serialize on the parent configuration row and repeat the check under that lock. Validation also enforces configured day/period/room membership, lesson-versus-break shape, and class-subject-teacher-paper allocation. There is no automatic timetable generator.
 
 ### Notifications
 
@@ -634,7 +647,7 @@ Notifications may target:
 - All teachers.
 - One specific user.
 
-The queryset returns only notifications relevant to the authenticated user. Mark-one-read and mark-all-read actions are available. Generic mutation permissions are currently too broad and are listed below as a priority risk.
+The queryset returns only notifications relevant to the authenticated user. Generic update/delete methods are disabled. Creation validates scope/recipient consistency: only DOS/leadership may broadcast to all teachers, teachers may notify DOS or another teacher for result workflows, and unrelated roles cannot create messages. Read state is stored per user through `NotificationReadReceipt`, so reading a broadcast does not change another user's state.
 
 ## API Route Groups
 
@@ -666,37 +679,27 @@ It creates users, staff, academics, students, historical enrollment, results, fi
 
 For current-period results, the seed command replays confirmed uploads through `apply_result_upload()` instead of separately seeding calculated marks. Historical terms without source uploads are seeded directly.
 
-`python manage.py seed_demo_data --reset` deletes application data in reverse dependency order before reseeding. Treat `--reset` as destructive and never run it against an unknown or production database without explicit authorization and a verified backup.
+`python manage.py seed_demo_data --reset` deletes application data in reverse dependency order before reseeding. Treat `--reset` as destructive and never run it against an unknown database without explicit authorization and a verified backup. Phase 28 blocks every `seed_demo_data` invocation when `DJANGO_ENVIRONMENT=production`, before fixture or database access.
 
 Demo account credentials and the fallback seed password are development-only and must not be used in production.
 
 ## Known Risks and Priority Improvements
 
-### High priority: authorization and privacy
+### Authorization and privacy baseline
 
-Several APIs permit any authenticated user to read sensitive school-wide data, including student and parent information, result uploads, report cards, staff records, fee status, and finance summaries. Define and enforce intended read scopes for teachers, specialized staff, administrators, and headmasters.
+Phase 2 narrows sensitive reads by role and object scope. Finance endpoints require Bursar/Admin/Headmaster. Bursars receive a minimal student identity DTO without family or academic fields. Teachers see only their own full staff profile, may use the minimal teacher directory for workflow addressing, and see students/results/report cards only for classes they teach or lead. Parent data remains limited to DOS and school leadership. Non-teaching staff see only their own profile; HR and school leadership retain staff-wide access. Preserve these scopes when adding endpoints and add an explicit permission test for every sensitive collection and detail route.
 
-`NotificationViewSet` currently allows any authenticated user to use generic create/update/delete operations. Restrict creation and broadcast capability to authorized roles, restrict read-status updates to safe actions, and disable unnecessary generic methods.
+### Result submission integrity baseline
 
-### High priority: result submission integrity
-
-Initial result creation does not fully enforce that:
-
-- The teacher is assigned to the selected class and subject.
-- The paper belongs to the subject.
-- Submitted students belong to the class and applicable subject enrollment.
-- Student IDs are unique within the request.
-- Term, result type, and year use valid domain values.
-- Weight is within an approved range.
-- The result submission window is currently open.
-
-Add serializer/service validation and integration tests before treating result submission as production-safe.
+Result creation validates role allocation, class-subject assignment, paper ownership and teacher paper allocation, unique/known student IDs, enrolled class scope for the selected term/year, exact term/result-type choices, year/weight bounds, and an open submission window. Resends must contain exactly the original student set. DOS/Admin/Headmaster fast entry validates the same academic relationships but intentionally bypasses the teacher submission window.
 
 ### High priority: transactional consistency and concurrency
 
-Result confirmation marks an upload confirmed before `apply_result_upload()` opens its transaction. A failure can leave a confirmed upload with partially absent derived state. Enclose the transition and all derived updates in one transaction and consider row locks/idempotency.
+Final result confirmation locks the upload row and encloses both the Confirmed transition and `apply_result_upload()` in one outer transaction, so derived-state failure rolls the status back. Resend, entry editing, confirmation, and both rejection transitions also lock and re-check their source state before writing.
 
-Review and rejection actions use read-check-write sequences without locking. Hiring the same candidate concurrently can create duplicate accounts. Timetable conflict checks can race. Use transactional services, `select_for_update()` where appropriate, and state-transition guards.
+Phase 3 serializes hiring by locking the candidate row, records the created account through `RecruitmentRecord.hired_user`, and returns HTTP 409 for already-hired or non-pending candidates. Timetable period and slot writes lock their parent configuration and repeat conflict/order checks inside the transaction, preventing concurrent requests from passing the same pre-save check.
+
+Class-teacher reassignment also uses a dedicated transactional service. It locks the teacher plus the current and target classes before changing either assignment, so a target save failure restores the complete pre-request database state automatically.
 
 ### Validation and error handling
 
@@ -718,18 +721,142 @@ There is no visible immutable ledger, reversal workflow, reconciliation, approva
 
 ### Production operations
 
-Current defaults are development-oriented:
+Phase 28 separates local defaults from production startup. Production rejects debug mode, placeholder/short secrets, weak/default database credentials, unsafe/missing hosts or frontend origins, incomplete proxy/HSTS configuration, invalid Redis numbers, and malformed authentication throttle rates. Remaining operational limitations are:
 
-- `DEBUG` defaults to true.
-- A fallback insecure Django secret is present.
-- Example database credentials are weak.
-- Docker runs Django's development server.
-- No Celery worker service is defined.
+- The development Docker Compose file runs Django's development server. A separate production Gunicorn image and standalone Compose file are available; see `PRODUCTION.md` for their host-proxy topology and remaining deployment requirements.
+- The VPS production Compose file includes an optional Celery worker profile; shared hosting uses eager execution and no worker.
 - Celery executes eagerly by default.
-- No visible rate limiting or login throttling exists.
-- No production media strategy, backup policy, structured logging, monitoring, or deployment health checks are defined for the application.
+- Login and refresh endpoints have Redis-backed application throttling, but there is no gateway/WAF-level rate limit, distributed abuse monitoring, or account-compromise alerting. DRF's cache throttle is defense-in-depth and is not an absolute concurrency or denial-of-service control.
+- Private media persistence, minimal liveness/readiness checks, and local container log rotation are implemented. Backup scheduling/restoration, off-host log collection, external monitoring/alerts, and real-domain verification still require hosting configuration.
 
-Production deployment should introduce secure secret management, HTTPS/security settings, a production WSGI/ASGI server, least-privilege infrastructure, backups, observability, and tested restoration procedures.
+Production deployment should introduce secure secret management, HTTPS/security settings, a production WSGI/ASGI server, edge rate limiting, least-privilege infrastructure, backups, observability, and tested restoration procedures.
+
+## Production Deployment Configuration
+
+Phase 28 makes production configuration fail safe. `DJANGO_ENVIRONMENT=production` enables the HTTPS policy and validates every access-critical value while Django settings load. An invalid deployment exits with `ImproperlyConfigured: Unsafe production configuration` and lists variable names/reasons without printing secrets. Development remains the default when `DJANGO_ENVIRONMENT` is absent.
+
+`production.env.example` is the copyable variable checklist. Its `.example` domains and `change-me` secrets are intentionally rejected; replace them rather than deploying the file unchanged. Store real values in the deployment platform's encrypted secret/config service, not Git, an image layer, logs, chat, or this guide.
+
+### Required production values
+
+The following is a format example, not the school's final secret or domain selection:
+
+```dotenv
+DJANGO_ENVIRONMENT=production
+DJANGO_DEBUG=False
+DJANGO_SECRET_KEY=<unique-generated-secret-at-least-50-characters>
+
+DJANGO_ALLOWED_HOSTS=api.<real-school-domain>
+CORS_ALLOWED_ORIGINS=https://portal.<real-school-domain>
+CSRF_TRUSTED_ORIGINS=https://portal.<real-school-domain>
+
+DB_NAME=hopeful_future_sms
+DB_USER=hopeful_future_app
+DB_PASSWORD=<unique-generated-database-password-at-least-20-characters>
+DB_HOST=<private-database-hostname>
+DB_PORT=3306
+
+REDIS_HOST=<private-redis-hostname>
+REDIS_PORT=6379
+REDIS_CACHE_DB=1
+REDIS_CELERY_DB=0
+
+DJANGO_TRUST_PROXY_SSL_HEADER=True
+DRF_NUM_PROXIES=1
+
+DJANGO_SECURE_HSTS_SECONDS=3600
+DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=False
+DJANGO_SECURE_HSTS_PRELOAD=False
+
+AUTH_LOGIN_IP_THROTTLE_RATE=30/minute
+AUTH_LOGIN_USERNAME_THROTTLE_RATE=5/minute
+AUTH_REFRESH_IP_THROTTLE_RATE=60/minute
+
+CELERY_TASK_ALWAYS_EAGER=True
+```
+
+The matching frontend production build value is:
+
+```dotenv
+VITE_API_BASE_URL=https://api.<real-school-domain>/api
+```
+
+Do not add a trailing slash to `VITE_API_BASE_URL`. The frontend appends paths beginning with `/`. The public frontend origin must exactly match the scheme, hostname, and optional port in both backend origin lists; origin values have no path or trailing slash.
+
+| Value | How to choose it | Incorrect-value effect |
+| --- | --- | --- |
+| `DJANGO_SECRET_KEY` | Generate once with `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`; store it as a secret and keep it stable across application instances/restarts. | Missing, placeholder, `django-insecure-*`, low-variety, or shorter than 50 characters stops startup. Changing it invalidates signed Django sessions and other signed values. |
+| `DB_NAME` | Dedicated production database, recommended `hopeful_future_sms`. | Wrong name causes database connection or migration failure. |
+| `DB_USER` | Dedicated least-privilege application account, recommended `hopeful_future_app`; never `root`. Grant only the privileges required for runtime and controlled migrations. | `root`, missing, or incorrect user stops validation or database login. |
+| `DB_PASSWORD` | Generate independently, for example `openssl rand -hex 32`; minimum enforced length is 20 characters. | Default, placeholder, short, or incorrect password stops validation or database login. |
+| `DB_HOST` / `DB_PORT` | Private DNS/service address reachable from the backend; MySQL normally uses `3306`. Do not use a public database endpoint without provider-required TLS and network controls. | Wrong routing prevents startup/runtime database access. |
+| `DJANGO_ALLOWED_HOSTS` | Public backend hostname only, such as `api.school-domain.ug`; comma-separate additional intentional hostnames. Do not include `https://`, a port, path, wildcard, localhost, or reserved example name. | A missing host stops startup; a real request using an unlisted Host receives HTTP 400 `DisallowedHost`. |
+| `CORS_ALLOWED_ORIGINS` | Exact public frontend origin, such as `https://portal.school-domain.ug`; comma-separate real additional frontends. | The browser blocks frontend API access even when the backend itself is healthy. |
+| `CSRF_TRUSTED_ORIGINS` | Include every CORS origin using the same exact HTTPS value. Add another origin only if it is trusted to make CSRF-protected requests. | Django Admin or future cookie-based protected writes can return CSRF 403. |
+| `REDIS_HOST` / `REDIS_PORT` | Private Redis service address; normal port `6379`. Restrict it at the network layer. | Cache-backed login throttling and other cache operations fail when Redis is unreachable. |
+| `REDIS_CACHE_DB` / `REDIS_CELERY_DB` | Keep separate non-negative logical DBs; current contract is cache `1`, Celery `0`. | Sharing them makes cache flushes capable of destroying Celery state. |
+| Authentication throttle rates | Keep the Phase 27 defaults unless measured school traffic justifies change. Accepted forms include `5/minute` and `100/hour`. | Invalid syntax stops production startup; overly low rates temporarily block legitimate shared-network users. |
+
+The production profile automatically sets `SECURE_SSL_REDIRECT=True`, `SESSION_COOKIE_SECURE=True`, `CSRF_COOKIE_SECURE=True`, `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE='Lax'`, `CSRF_COOKIE_SAMESITE='Lax'`, `SECURE_CONTENT_TYPE_NOSNIFF=True`, `SECURE_REFERRER_POLICY='same-origin'`, `SECURE_CROSS_ORIGIN_OPENER_POLICY='same-origin'`, and `X_FRAME_OPTIONS='DENY'`. Do not weaken them to work around a proxy or domain problem; correct the deployment topology instead.
+
+### HTTPS, proxy, and client-IP values
+
+`DJANGO_TRUST_PROXY_SSL_HEADER=True` is safe only when the final trusted proxy removes any client-supplied `X-Forwarded-Proto` header and writes its own value. Otherwise a caller may spoof whether Django considers a request secure. `DRF_NUM_PROXIES` controls which address DRF trusts for Phase 27 throttling and must match the sanitized proxy chain.
+
+| Request path to Django | `DJANGO_TRUST_PROXY_SSL_HEADER` | `DRF_NUM_PROXIES` | Requirement |
+| --- | --- | --- | --- |
+| Django receives HTTPS directly | `False` | `0` | No forwarded security headers are trusted. |
+| Client -> one trusted TLS-terminating Nginx/ingress -> Django | `True` | `1` | The proxy strips incoming forwarded headers and writes canonical values. |
+| Client -> two trusted proxy hops -> Django | `True` | `2` | Both hops and the exact `X-Forwarded-For` behavior are verified by the operator. |
+
+If the SSL-header trust value is wrong, production can enter an HTTPS redirect loop. If the proxy count is too low, many users may share one throttle identity; if too high, callers may influence the selected address and evade limits. Confirm these two values with the actual hosting/network provider before opening traffic.
+
+Start HSTS at `3600` seconds only after HTTPS works end-to-end, including the API hostname. After sustained validation, increase it to `31536000`. Keep `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=False` and `DJANGO_SECURE_HSTS_PRELOAD=False` until every subdomain is permanently HTTPS-capable and the school explicitly accepts the difficult rollback consequences. Enabling preload in settings alone does not submit the domain to browser preload lists.
+
+### Deployment preflight and access verification
+
+Before public traffic:
+
+1. Provision final backend/frontend DNS names and valid TLS certificates.
+2. Create the least-privilege database user/database and private Redis service; verify network access from the backend runtime.
+3. Put the required values in the platform secret/config store and confirm the frontend production build used the matching `VITE_API_BASE_URL`.
+4. Run these commands inside the exact configured backend image/runtime:
+
+```bash
+python manage.py check
+python manage.py check --deploy --tag security
+python manage.py makemigrations --check --dry-run
+python manage.py migrate --plan
+```
+
+5. Take and verify a restorable database backup before applying migrations, then run `python manage.py migrate` once through the controlled release process.
+6. Start the backend and verify HTTPS has no redirect loop, the API hostname is accepted, and HTTP redirects to HTTPS.
+7. From the real frontend origin, verify CORS preflight/login, token refresh, logout, and one permitted read for every role. Verify an unauthorized role remains denied.
+8. Verify Redis-backed login throttling and review logs without recording credentials or tokens.
+9. Increase HSTS only after monitoring confirms HTTPS stability. Never run `seed_demo_data` in production; Phase 28 blocks it even if invoked accidentally.
+
+With the safe first-rollout HSTS values (`3600`, subdomains `False`, preload `False`), the tagged deployment check must exit successfully and report only Django advisories `security.W005` and `security.W021`. Those advisories accurately record that subdomains/preload are being deferred; do not silence them. Any other security warning must be resolved before traffic opens. After every subdomain is permanently HTTPS-ready and the school approves preload, change HSTS to `31536000`/`True`/`True` and require the mature strict gate:
+
+```bash
+python manage.py check --deploy --tag security --fail-level WARNING
+```
+
+An unfiltered `python manage.py check --deploy` also runs drf-spectacular schema diagnostics; its existing OpenAPI warnings are tracked separately and are not Django security-setting failures. Do not silence them or use them as a reason to skip the tagged security gate.
+
+### Troubleshooting without weakening security
+
+| Symptom | Check first |
+| --- | --- |
+| Startup says `Unsafe production configuration` | Read every listed variable name/reason, correct the secret store, and restart. Never paste real values into logs or tickets. |
+| HTTP 400 / `DisallowedHost` | The request's public backend hostname must appear exactly in `DJANGO_ALLOWED_HOSTS` without scheme or port. |
+| Browser reports a CORS error | Match the frontend's visible HTTPS origin exactly in `CORS_ALLOWED_ORIGINS`; confirm the frontend is calling the correct API URL. |
+| Django Admin/future cookie write returns CSRF 403 | Match the frontend/admin HTTPS origin in `CSRF_TRUSTED_ORIGINS` and confirm proxy HTTPS detection. |
+| Repeated HTTPS redirects | Confirm the TLS-terminating proxy sanitizes and sets `X-Forwarded-Proto=https`, then verify `DJANGO_TRUST_PROXY_SSL_HEADER`. Do not disable SSL redirect. |
+| Legitimate users receive HTTP 429 together | Verify `DRF_NUM_PROXIES` against the real proxy chain before raising limits. |
+| Login fails with a cache/Redis error | Verify private Redis DNS, port, service health, network policy, and logical DB values. |
+| Database connection fails | Verify application-user credentials, private hostname/port, grants, provider TLS requirements, and migration state. |
+
+Correct configuration and restart is the rollback for Phase 28 settings failures; it does not require reverting code or database data. The VPS WSGI/runtime procedure is in `PRODUCTION.md`; the initial Namecheap shared-hosting procedure is in `CPANEL.md`. External backup, monitoring, and deployment acceptance gates remain mandatory.
 
 ### Testing
 
@@ -847,6 +974,63 @@ At the time of the initial read-only review:
 - The audited local Git baseline is commit `b692448`; no remote is configured.
 
 Re-run these checks after changes; this section is historical context, not a substitute for current validation.
+
+## Phase 25: Atomic Result-Workflow Notifications
+
+- `ResultUploadViewSet` owns notifications required by governed upload transitions. Submission, resend, Class Teacher confirmation/rejection, and DOS confirmation/rejection create notification records inside the same `transaction.atomic()` boundary as their result state change.
+- Submission targets the assigned Class Teacher, or the DOS broadcast when no Class Teacher exists. Resend targets the Class Teacher. Class Teacher confirmation targets DOS and the distinct submitting teacher; rejection targets the distinct submitting teacher. DOS confirmation targets the submitting teacher and distinct Class Teacher; DOS rejection targets the Class Teacher.
+- Notification recipients and teacher display names are derived from backend relationships (`Teacher.user`, `SchoolClass.class_teacher`, and `ResultUpload.teacher`). Never accept workflow recipient identity or display names from the client.
+- If result application or any other operation in the transition transaction fails, its notification rolls back with the status change. Frontends must not compensate with a separate notification request after these endpoints succeed.
+- Result-window announcements remain separate notification creation requests because window scheduling is not a `ResultUpload` state transition.
+- Verification baseline after this change: `python manage.py check` passes, migration drift reports no changes, focused result-security tests pass 10/10, and the complete backend suite passes 54/54 using the Docker MySQL environment.
+
+## Phase 26: Deterministic Academic Pagination
+
+- `SubjectViewSet` orders by `name`, then `id`; `ResultWindowViewSet` orders by descending `year`, then `term`, `result_type`, and `id`; `ReportCardConfigViewSet` orders by descending `year`, then `term` and `id`.
+- These queryset-level orderings make DRF pagination deterministic without changing model metadata or creating a migration. Preserve a unique final `id` tie-breaker whenever these sort keys change.
+- Endpoint paths, filters, serializers, pagination envelopes, and role permissions are unchanged. Clients may rely on stable traversal across all pages but must still use backend IDs as identity.
+- The teacher academic-reference test promotes `UnorderedObjectListWarning` to an exception, guarding these paginated endpoints against future unordered querysets.
+- Verification baseline: focused academics tests pass 9/9, the complete backend suite passes 54/54 without unordered-pagination warnings, `manage.py check` passes, and migration drift reports no changes.
+
+## Phase 27: Authentication Abuse Protection
+
+- `POST /api/auth/login/` uses two cache-backed limits: 30 requests per minute from one trusted source IP and 5 requests per minute against one submitted username by default. `POST /api/auth/refresh/` has an independent default of 60 requests per minute per trusted source IP.
+- Operators may change the limits with `AUTH_LOGIN_IP_THROTTLE_RATE`, `AUTH_LOGIN_USERNAME_THROTTLE_RATE`, and `AUTH_REFRESH_IP_THROTTLE_RATE`. Use DRF rate strings such as `5/minute` or `100/hour`; invalid values are deployment configuration errors.
+- `DRF_NUM_PROXIES` defaults to `0`, so client-supplied `X-Forwarded-For` values are not trusted in direct deployments. Set it only to the exact number of trusted reverse proxies that sanitize that header; a wrong value can either combine unrelated users or let callers evade the IP limit.
+- Username throttle keys contain a secret-keyed SHA-256 digest rather than the submitted username. Malformed non-object requests skip only the username-specific limiter and remain covered by the source-IP limiter before serializer validation.
+- Normal successful login and refresh payloads are unchanged. Limited requests return HTTP 429 with a `detail` explanation and `Retry-After`; the portal displays that explanation and does not create authentication storage.
+- These application limits depend on the shared Redis cache and are defense-in-depth. They do not replace reverse-proxy/WAF limits, monitoring, alerting, or stronger credential-security controls, and DRF cache throttles may be approximate under highly concurrent traffic.
+- Phase 27 adds no model or schema migration. Verification passes 5/5 focused account tests and 59/59 complete backend tests; Django system checks and migration-drift checks are clean. Frontend type checking, lint, 44/44 unit tests, production build, and a strict no-retry run of all 41 browser scenarios pass.
+
+## Phase 28: Production Security Configuration
+
+- `DJANGO_ENVIRONMENT` now selects `development`, `test`, or `production` and defaults to `development`. Existing localhost hosts/origins, HTTP operation, Docker `runserver`, eager Celery behavior, and developer commands remain available without production HTTPS enforcement.
+- Production settings fail while importing if required variables are missing or if debug mode, placeholder/weak secrets, root/weak database credentials, wildcard/local/example hosts, non-HTTPS frontend origins, incomplete proxy/HSTS values, invalid Redis numbers, or malformed authentication throttle rates are supplied. Error output names the settings to correct without printing their secret contents.
+- The production profile automatically enables SSL redirect, secure session/CSRF cookies, HTTP-only session cookies, `Lax` same-site cookies, content-type protection, same-origin referrer/opener policy, and frame denial. HSTS requires at least 3600 seconds; subdomain/preload adoption remains an explicit staged decision.
+- `DJANGO_TRUST_PROXY_SSL_HEADER` and `DRF_NUM_PROXIES` are independent explicit production choices. Preserve the topology rules in “Production Deployment Configuration”; weakening SSL redirect or trusting unsanitized forwarded headers is not an acceptable fix for a redirect or throttling problem.
+- `production.env.example` is a non-deployable backend checklist with rejected placeholder domains/secrets. The frontend companion template supplies `VITE_API_BASE_URL`; both agent guides document exact domain/origin alignment, value generation, deployment preflight, HSTS rollout, access verification, and symptom-based troubleshooting.
+- `seed_demo_data` raises `CommandError` immediately in production, including without `--reset`. Demo credentials and fixtures cannot be introduced through that management command once the production profile is active.
+- This phase changes configuration behavior only: no model migration, stored data, route, serializer, permission, or normal API payload changed. Production serving, media, backups, monitoring, health checks, and a Celery worker remain later operational work.
+- Verification baseline: 15/15 focused production configuration/transport tests and 74/74 complete backend tests pass; local `manage.py check`, Python compilation, migration-drift checks, and a simulated mature-production `check --deploy --tag security --fail-level WARNING` pass. Frontend type checking, lint, production build, 44/44 unit tests, and a strict no-retry run of all 41 browser scenarios pass.
+
+## Phase 29: Production WSGI Runtime
+
+- `Dockerfile.production` uses a separate dependency build stage and runs Gunicorn as non-root UID/GID 10001. `requirements-production.txt` adds pinned Gunicorn without changing local development dependencies. `.dockerignore` excludes environment files, local runtime artifacts, and Git metadata from image build contexts.
+- `compose.production.yml` is standalone, not a development override. It requires `PRODUCTION_ENV_FILE`, forces production/debug-off settings, binds only host loopback port 8001, drops capabilities, and uses a read-only root filesystem with writable `/tmp`. Provision reachable private MySQL/Redis services and a same-host TLS reverse proxy separately.
+- `gunicorn.conf.py` starts two synchronous workers by default, configurable with `WEB_CONCURRENCY`. Worker timeout is 60 seconds, graceful shutdown is 30 seconds, and Compose allows 45 seconds before forced termination. Startup never applies migrations or seeds data.
+- Django's explicit trusted-proxy policy remains authoritative; Gunicorn's additional forwarded-header interpretation is disabled. Access logs omit query strings, headers, and bodies. Server logs go to stdout/stderr for platform collection.
+- `PRODUCTION.md` documents the VPS build, preflight, controlled migration/startup, proxy topology, and rollback boundaries. The image collects static files, Compose mounts private persistent media, and an optional worker profile provides Celery. Health probes and bounded local logs are implemented; real infrastructure, backups, centralized logging/monitoring, and public-domain verification remain external acceptance gates.
+- This phase adds server packaging only; API contracts and frontend behavior are unchanged. Existing development Compose behavior remains available.
+
+## Shared Hosting and Operational Deployment Support
+
+- The first deployment target is Namecheap shared hosting with cPanel; Linode is the later VPS target. The portal is `https://www.hopefulfuture.ac.ug/schoolsystem/`, the API base is `https://api.hopefulfuture.ac.ug/api`, and the school website remains at its existing root. Backend CORS/CSRF origin values are `https://www.hopefulfuture.ac.ug` without a path. `CPANEL.md` is the shared-host runbook, while `PRODUCTION.md` and the production Compose file require a Docker-capable VPS.
+- `passenger_wsgi.py` provides the cPanel `application` entry point. `requirements-cpanel.txt` reuses the pure-Python PyMySQL dependency profile. Select Python 3.12 and verify the account's SQL compatibility before accepting data.
+- `DJANGO_CACHE_BACKEND` is `redis` by default or explicitly `database`. Database mode uses Django DatabaseCache and the `sms_cache` table, created with `manage.py createcachetable`, for cross-process throttling. It requires eager Celery, omits Redis production requirements, and preserves HTTPS, secret, database, and authentication-rate validation. Do not silently fall back to local-memory caching.
+- `DJANGO_STATIC_ROOT` and `DJANGO_MEDIA_ROOT` accept absolute deployment paths. Static assets may be public; media remains private. The current product stores photo URLs and does not expose a general upload/download API.
+- `GET`/`HEAD /health/live/` returns uncached `{"status":"ok"}` without dependency access. `/health/ready/` verifies SQL and the selected cache and returns minimal HTTP 503 on dependency failure. Only these exact paths bypass SSL redirect for internal probes; the VPS proxy template blocks them publicly. cPanel external monitoring must use HTTPS.
+- The VPS runtime uses a private media volume, collected static assets, bounded local container logs, and an optional `worker` profile. `deploy/nginx.conf.example` is an unconfigured host-proxy template with sanitized headers and edge authentication limits.
+- Database-cache throttles remain approximate under concurrent requests and add SQL load. External backups, restore rehearsal, provider log collection/alerts, domain/TLS configuration, and real-host smoke tests are separate deployment acceptance requirements; local tests cannot certify those services.
 
 ## Pre-Change Checklist
 

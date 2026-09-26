@@ -35,6 +35,10 @@ class HireResult:
     generated_password: str
 
 
+class CandidateNotHireable(Exception):
+    pass
+
+
 def _unique_username(base: str) -> str:
     base = slugify(base) or "staff"
     username = base
@@ -46,15 +50,19 @@ def _unique_username(base: str) -> str:
 
 
 def hire_candidate(candidate_id: int) -> HireResult | None:
-    try:
-        candidate = RecruitmentRecord.objects.get(pk=candidate_id)
-    except RecruitmentRecord.DoesNotExist:
-        return None
-
     with transaction.atomic():
+        try:
+            candidate = RecruitmentRecord.objects.select_for_update().get(pk=candidate_id)
+        except RecruitmentRecord.DoesNotExist:
+            return None
+        if candidate.status == RecruitmentStatus.HIRED or candidate.hired_user_id:
+            raise CandidateNotHireable("This candidate has already been hired.")
+        if candidate.status != RecruitmentStatus.PENDING:
+            raise CandidateNotHireable("Only a pending candidate can be hired.")
+
         first_name, _, last_name = candidate.candidate_name.partition(" ")
         username_base = candidate.email.split("@")[0] if candidate.email else candidate.candidate_name
-        username = _unique_username(username_base)
+        username = _unique_username(f"{username_base}-{candidate.pk}")
         password = get_random_string(12)
 
         role = Role.TEACHER if candidate.staff_type == StaffType.TEACHING else Role.NON_TEACHING
@@ -88,7 +96,8 @@ def hire_candidate(candidate_id: int) -> HireResult | None:
             )
 
         candidate.status = RecruitmentStatus.HIRED
-        candidate.save(update_fields=["status"])
+        candidate.hired_user = user
+        candidate.save(update_fields=["status", "hired_user"])
 
     return HireResult(profile=profile, user=user, generated_password=password)
 

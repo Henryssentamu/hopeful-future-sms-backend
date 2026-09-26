@@ -1,4 +1,4 @@
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, serializers, viewsets
 
 from apps.accounts.permissions import IsDOSOrAdmin
 
@@ -24,6 +24,11 @@ class TimetablePeriodViewSet(viewsets.ModelViewSet):
     serializer_class = TimetablePeriodSerializer
     permission_classes = [ReadAllWriteDOSOrAdmin]
     filterset_fields = ["config"]
+
+    def perform_destroy(self, instance):
+        if instance.config.slots.filter(period_index=instance.order).exists():
+            raise serializers.ValidationError({"detail": "Delete this period's timetable slots first."})
+        instance.delete()
 
 
 class TimetableSlotViewSet(viewsets.ModelViewSet):

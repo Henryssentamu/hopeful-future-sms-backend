@@ -80,6 +80,10 @@ class RemoveTeacherSerializer(serializers.Serializer):
     teacher_id = serializers.IntegerField()
 
 
+class ReassignClassTeacherSerializer(serializers.Serializer):
+    teacher_id = serializers.IntegerField()
+
+
 class ReportCardConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReportCardConfig
@@ -90,3 +94,10 @@ class ResultWindowSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResultWindow
         fields = ["id", "result_type", "term", "year", "opens_at", "closes_at"]
+
+    def validate(self, attrs):
+        opens_at = attrs.get("opens_at", getattr(self.instance, "opens_at", None))
+        closes_at = attrs.get("closes_at", getattr(self.instance, "closes_at", None))
+        if opens_at and closes_at and closes_at <= opens_at:
+            raise serializers.ValidationError({"closes_at": "Closing time must be after opening time."})
+        return attrs

@@ -1,0 +1,51 @@
+# Include inside nginx's http {} context. Replace all .example values.
+# This template assumes nginx terminates TLS on the same host as Docker.
+limit_req_zone $binary_remote_addr zone=sms_auth:10m rate=30r/m;
+log_format sms '$remote_addr $request_method $uri $status $request_time';
+
+server {
+    listen 80;
+    server_name api.school.example;
+    return 301 https://api.school.example$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name api.school.example;
+    ssl_certificate /etc/letsencrypt/live/api.school.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.school.example/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log /var/log/nginx/sms-access.log sms;
+    # Standard nginx error messages can contain request URLs; keep restricted.
+    error_log /var/log/nginx/sms-error.log warn;
+    client_max_body_size 10m;
+    add_header X-Content-Type-Options nosniff always;
+
+    location /static/ {
+        alias /srv/hopeful-future/static/;
+        autoindex off;
+    }
+
+    # Media contains potentially private records. No public file alias.
+    location /media/ { return 404; }
+    location /health/ { return 404; }
+
+    # Shared proxy settings are inherited by both proxy locations.
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 65s;
+    proxy_send_timeout 65s;
+
+    location ~ ^/api/auth/(login|refresh)/$ {
+        limit_req zone=sms_auth burst=10 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8001;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8001;
+    }
+}

@@ -30,7 +30,8 @@ import json
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from apps.accounts.models import Role
@@ -106,6 +107,9 @@ class Command(BaseCommand):
         parser.add_argument("--reset", action="store_true", help="Delete all seeded data first (FK-safe order).")
 
     def handle(self, *args, **options):
+        if settings.IS_PRODUCTION:
+            raise CommandError("Demo data seeding is disabled when DJANGO_ENVIRONMENT=production.")
+
         data = json.loads(SEED_DATA_PATH.read_text())
 
         if options["reset"]:

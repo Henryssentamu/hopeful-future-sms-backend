@@ -73,6 +73,10 @@ class RecruitmentRecord(models.Model):
     applied_date = models.DateField()
     status = models.CharField(max_length=10, choices=RecruitmentStatus.choices, default=RecruitmentStatus.PENDING)
     notes = models.TextField(blank=True)
+    hired_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="recruitment_record", editable=False,
+    )
 
     def __str__(self):
         return f"{self.candidate_name} ({self.role})"

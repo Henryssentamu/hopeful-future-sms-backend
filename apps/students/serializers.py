@@ -82,3 +82,43 @@ class StudentSerializer(serializers.ModelSerializer):
             "enrollment_date", "photo_url", "parent_info", "subjects",
         ]
         read_only_fields = ["performance"]
+
+
+class StudentFinanceSerializer(serializers.ModelSerializer):
+    """Minimum student identity needed by finance workflows; no family or academic records."""
+
+    class_name = serializers.CharField(source="school_class.name", read_only=True)
+    level = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Student
+        fields = ["id", "student_number", "name", "school_class", "class_name", "level", "combination"]
+
+
+class StudentTeacherSerializer(serializers.ModelSerializer):
+    """Academic student data needed for teaching, without family or contact details."""
+
+    class_name = serializers.CharField(source="school_class.name", read_only=True)
+    level = serializers.CharField(read_only=True)
+    subjects = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Student
+        fields = [
+            "id", "student_number", "name", "school_class", "class_name", "level",
+            "combination", "performance", "photo_url", "subjects",
+        ]
+
+    def get_subjects(self, student):
+        request = self.context.get("request")
+        teacher = getattr(getattr(request, "user", None), "teacher_profile", None)
+        if teacher is None:
+            return []
+
+        enrollments = student.subject_enrollments.all()
+        if student.school_class.class_teacher_id != teacher.id:
+            assigned_subject_ids = student.school_class.subject_assignments.filter(
+                teacher_assignments__teacher=teacher,
+            ).values_list("subject_id", flat=True)
+            enrollments = enrollments.filter(subject_id__in=assigned_subject_ids)
+        return StudentSubjectEnrollmentSerializer(enrollments, many=True).data

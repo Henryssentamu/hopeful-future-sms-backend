@@ -7,13 +7,22 @@ from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
+
+from .environment import env_bool, env_csv, env_int, get_environment, validate_production_configuration
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-key")
-DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+ENVIRONMENT = get_environment()
+IS_PRODUCTION = ENVIRONMENT == "production"
+
+SECRET_KEY = os.getenv(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-development-only-key-never-use-this-value-in-production",
+).strip()
+DEBUG = env_bool("DJANGO_DEBUG", ENVIRONMENT == "development")
+ALLOWED_HOSTS = env_csv("DJANGO_ALLOWED_HOSTS", "" if IS_PRODUCTION else "localhost,127.0.0.1")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -79,11 +88,11 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",
-        "NAME": os.getenv("DB_NAME", "hfss"),
-        "USER": os.getenv("DB_USER", "hfss"),
-        "PASSWORD": os.getenv("DB_PASSWORD", "hfss"),
-        "HOST": os.getenv("DB_HOST", "mysql"),
-        "PORT": os.getenv("DB_PORT", "3306"),
+        "NAME": os.getenv("DB_NAME", "" if IS_PRODUCTION else "hfss"),
+        "USER": os.getenv("DB_USER", "" if IS_PRODUCTION else "hfss"),
+        "PASSWORD": os.getenv("DB_PASSWORD", "" if IS_PRODUCTION else "hfss"),
+        "HOST": os.getenv("DB_HOST", "" if IS_PRODUCTION else "mysql"),
+        "PORT": os.getenv("DB_PORT", "" if IS_PRODUCTION else "3306"),
         "OPTIONS": {
             "charset": "utf8mb4",
         },
@@ -106,8 +115,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = Path(os.getenv("DJANGO_STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 MEDIA_URL = "media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = Path(os.getenv("DJANGO_MEDIA_ROOT", str(BASE_DIR / "media")))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -131,6 +141,14 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_RATES": {
+        "login_ip": os.getenv("AUTH_LOGIN_IP_THROTTLE_RATE", "30/minute"),
+        "login_username": os.getenv("AUTH_LOGIN_USERNAME_THROTTLE_RATE", "5/minute"),
+        "token_refresh_ip": os.getenv("AUTH_REFRESH_IP_THROTTLE_RATE", "60/minute"),
+    },
+    # Trust only REMOTE_ADDR unless deployment explicitly declares how many
+    # reverse proxies sanitize X-Forwarded-For before traffic reaches Django.
+    "NUM_PROXIES": env_int("DRF_NUM_PROXIES", 0),
 }
 
 SIMPLE_JWT = {
@@ -154,9 +172,34 @@ SPECTACULAR_SETTINGS = {
 # CORS — the frontend's Vite dev server runs on port 8080 (see
 # frontends/hopeful-future-portal/vite.config.ts), not the Vite default.
 # ---------------------------------------------------------------------------
-CORS_ALLOWED_ORIGINS = [
-    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080").split(",") if o.strip()
-]
+CORS_ALLOWED_ORIGINS = env_csv("CORS_ALLOWED_ORIGINS", "" if IS_PRODUCTION else "http://localhost:8080")
+CSRF_TRUSTED_ORIGINS = env_csv(
+    "CSRF_TRUSTED_ORIGINS",
+    "" if IS_PRODUCTION else "http://localhost:8080,http://127.0.0.1:8080",
+)
+
+# Production transport policy. HSTS subdomain coverage and preload remain
+# explicit rollout decisions because enabling them before every subdomain is
+# HTTPS-ready can make those subdomains inaccessible in supporting browsers.
+SECURE_SSL_REDIRECT = IS_PRODUCTION
+# The edge proxy restricts operational probes; these expose no application data.
+SECURE_REDIRECT_EXEMPT = [r"^health/live/$", r"^health/ready/$"]
+SESSION_COOKIE_SECURE = IS_PRODUCTION
+CSRF_COOKIE_SECURE = IS_PRODUCTION
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
+SECURE_HSTS_SECONDS = env_int("DJANGO_SECURE_HSTS_SECONDS", 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+SECURE_HSTS_PRELOAD = env_bool("DJANGO_SECURE_HSTS_PRELOAD", False)
+
+TRUST_PROXY_SSL_HEADER = env_bool("DJANGO_TRUST_PROXY_SSL_HEADER", False)
+if TRUST_PROXY_SSL_HEADER:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ---------------------------------------------------------------------------
 # Redis — cache and Celery broker live on DIFFERENT logical DBs so a cache
@@ -173,9 +216,23 @@ CACHES = {
         "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CACHE_DB}",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SOCKET_CONNECT_TIMEOUT": 2,
+            "SOCKET_TIMEOUT": 2,
         },
     }
 }
+
+CACHE_BACKEND = os.getenv("DJANGO_CACHE_BACKEND", "redis").strip().lower()
+if CACHE_BACKEND == "database":
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+            "LOCATION": "sms_cache",
+            "OPTIONS": {"MAX_ENTRIES": 10000},
+        }
+    }
+elif CACHE_BACKEND != "redis":
+    raise ImproperlyConfigured("DJANGO_CACHE_BACKEND must be redis or database.")
 
 CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
 CELERY_RESULT_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
@@ -183,12 +240,25 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
-# Results engine runs synchronously until the port is verified correct
-# (see plan doc, Phase 7) — flip to False once Celery worker is wired up
-# and confirm-result-upload is moved onto a task.
-CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "True") == "True"
+# Result confirmation remains synchronous and transactional in both runtimes.
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", True)
+if CACHE_BACKEND == "database" and not CELERY_TASK_ALWAYS_EAGER:
+    raise ImproperlyConfigured("The database-cache shared-hosting profile requires CELERY_TASK_ALWAYS_EAGER=True.")
 
 # ---------------------------------------------------------------------------
 # Seed data (see apps/core/management/commands/seed_demo_data.py)
 # ---------------------------------------------------------------------------
-SEED_DEMO_PASSWORD = os.getenv("SEED_DEMO_PASSWORD", "Demo@2025")
+SEED_DEMO_PASSWORD = os.getenv("SEED_DEMO_PASSWORD", "" if IS_PRODUCTION else "Demo@2025")
+
+if IS_PRODUCTION:
+    validate_production_configuration(
+        environment_variables=os.environ,
+        debug=DEBUG,
+        secret_key=SECRET_KEY,
+        allowed_hosts=ALLOWED_HOSTS,
+        cors_allowed_origins=CORS_ALLOWED_ORIGINS,
+        csrf_trusted_origins=CSRF_TRUSTED_ORIGINS,
+        database_settings=DATABASES["default"],
+        secure_hsts_seconds=SECURE_HSTS_SECONDS,
+        throttle_rates=REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"],
+    )

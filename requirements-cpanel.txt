@@ -1,0 +1,3 @@
+# Pure-Python database driver for shared hosting without build headers.
+# Keep framework dependencies aligned with the existing local-driver profile.
+-r requirements-local.txt

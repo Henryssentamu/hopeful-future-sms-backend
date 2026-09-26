@@ -2,7 +2,8 @@ from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import IsAdminSideStaff, IsHROrAdmin
+from apps.accounts.models import Role
+from apps.accounts.permissions import IsHROrAdmin
 
 from .models import BiometricLog, NonTeachingStaff, RecruitmentRecord, Teacher
 from .serializers import (
@@ -10,14 +11,20 @@ from .serializers import (
     NonTeachingStaffSerializer,
     RecruitmentRecordSerializer,
     TeacherSerializer,
+    TeacherDirectorySerializer,
 )
-from .services import hire_candidate, reset_password
+from .services import CandidateNotHireable, hire_candidate, reset_password
 
 
 class ReadAllWriteHROrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
-            return bool(request.user and request.user.is_authenticated)
+            user = request.user
+            return bool(user and user.is_authenticated and (
+                user.is_superuser or user.role in (
+                    Role.ADMIN, Role.HEADMASTER, Role.HR, Role.DOS, Role.TEACHER, Role.NON_TEACHING,
+                )
+            ))
         return IsHROrAdmin().has_permission(request, view)
 
 
@@ -26,6 +33,20 @@ class TeacherViewSet(viewsets.ModelViewSet):
     serializer_class = TeacherSerializer
     permission_classes = [ReadAllWriteHROrAdmin]
     filterset_fields = ["status"]
+
+    def get_queryset(self):
+        qs = self.queryset
+        user = self.request.user
+        if user.is_superuser or user.role in (Role.ADMIN, Role.HEADMASTER, Role.HR, Role.DOS):
+            return qs
+        teacher = getattr(user, "teacher_profile", None)
+        return qs.filter(pk=teacher.pk) if teacher else qs.none()
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated])
+    def directory(self, request):
+        """Minimal teacher identity map for result-review notifications and assignment labels."""
+        teachers = Teacher.objects.select_related("user").filter(user__is_active=True)
+        return Response(TeacherDirectorySerializer(teachers, many=True).data)
 
     @action(detail=True, methods=["get"])
     def roles(self, request, pk=None):
@@ -53,6 +74,14 @@ class NonTeachingStaffViewSet(viewsets.ModelViewSet):
     permission_classes = [ReadAllWriteHROrAdmin]
     filterset_fields = ["status", "department"]
 
+    def get_queryset(self):
+        qs = self.queryset
+        user = self.request.user
+        if user.is_superuser or user.role in (Role.ADMIN, Role.HEADMASTER, Role.HR):
+            return qs
+        profile = getattr(user, "non_teaching_profile", None)
+        return qs.filter(pk=profile.pk) if profile else qs.none()
+
     @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password_action(self, request, pk=None):
         """POST /api/staff/non-teaching/{id}/reset-password/ — same as
@@ -73,7 +102,10 @@ class RecruitmentRecordViewSet(viewsets.ModelViewSet):
         """POST /api/staff/recruitment/{id}/hire/ — materializes a Teacher
         or NonTeachingStaff (+ User account) from this candidate and marks
         the record Hired. Port of StaffContext.hireCandidate."""
-        result = hire_candidate(int(pk))
+        try:
+            result = hire_candidate(int(pk))
+        except CandidateNotHireable as exc:
+            return Response({"detail": str(exc)}, status=409)
         if result is None:
             return Response({"detail": "Candidate not found."}, status=404)
         if isinstance(result.profile, Teacher):
@@ -93,5 +125,5 @@ class RecruitmentRecordViewSet(viewsets.ModelViewSet):
 class BiometricLogViewSet(viewsets.ModelViewSet):
     queryset = BiometricLog.objects.select_related("staff").all()
     serializer_class = BiometricLogSerializer
-    permission_classes = [IsAdminSideStaff]
+    permission_classes = [IsHROrAdmin]
     filterset_fields = ["staff", "date"]

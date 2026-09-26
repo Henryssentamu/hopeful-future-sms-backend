@@ -5,9 +5,34 @@ teacher of THIS class") live in apps.results.permissions instead, since they
 depend on apps.staff/apps.academics models — see plan doc, Phase 7.
 """
 
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from .models import Role
+
+
+FULL_ACCESS_ROLES = (Role.ADMIN, Role.HEADMASTER)
+
+
+def user_has_any_role(user, allowed_roles) -> bool:
+    """Return whether an authenticated user belongs to an allowed role.
+
+    Django superusers and the two full-access school leadership roles are
+    handled consistently throughout the API. Views can still omit those
+    leadership roles when an operation is deliberately more restrictive.
+    """
+    if not (user and user.is_authenticated):
+        return False
+    if user.is_superuser:
+        return True
+    return user.role in allowed_roles
+
+
+class RoleBasedPermission(BasePermission):
+    """Apply per-view role sets for safe and mutating HTTP methods."""
+
+    def has_permission(self, request, view):
+        roles = getattr(view, "read_roles", ()) if request.method in SAFE_METHODS else getattr(view, "write_roles", ())
+        return user_has_any_role(request.user, roles)
 
 
 class HasRole(BasePermission):
@@ -24,14 +49,10 @@ class HasRole(BasePermission):
 
     def has_permission(self, request, view):
         user = request.user
-        if not (user and user.is_authenticated):
-            return False
-        if user.is_superuser:
-            return True
         effective_roles = self.allowed_roles
         if Role.ADMIN in effective_roles and Role.HEADMASTER not in effective_roles:
             effective_roles = effective_roles + (Role.HEADMASTER,)
-        return user.role in effective_roles
+        return user_has_any_role(user, effective_roles)
 
 
 class IsAdmin(HasRole):

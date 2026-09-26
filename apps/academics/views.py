@@ -1,8 +1,9 @@
+from django.shortcuts import get_object_or_404
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import IsDOSOrAdmin, IsHeadmasterOrAdmin
+from apps.accounts.models import Role
 from apps.staff.models import Teacher
 
 from .models import ClassSubjectAssignment, Department, ReportCardConfig, ResultWindow, SchoolClass, Subject, SubjectPaper
@@ -12,46 +13,70 @@ from .serializers import (
     DepartmentSerializer,
     ReportCardConfigSerializer,
     RemoveTeacherSerializer,
+    ReassignClassTeacherSerializer,
     ResultWindowSerializer,
     SchoolClassSerializer,
     SubjectPaperSerializer,
     SubjectSerializer,
 )
-from .services import assign_teacher_to_class_subject, remove_teacher_from_class_subject
+from .services import assign_teacher_to_class_subject, reassign_class_teacher, remove_teacher_from_class_subject
 
 
-class ReadAllWriteDOSOrAdmin(permissions.BasePermission):
+class AcademicRolePermission(permissions.BasePermission):
+    """Apply the explicit read/write role sets declared by an academic view."""
+
     def has_permission(self, request, view):
-        if request.method in permissions.SAFE_METHODS:
-            return bool(request.user and request.user.is_authenticated)
-        return IsDOSOrAdmin().has_permission(request, view)
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        allowed_roles = view.read_roles if request.method in permissions.SAFE_METHODS else view.write_roles
+        return user.role in allowed_roles
 
 
-class ReadAllWriteHeadmasterOrAdmin(permissions.BasePermission):
+class SchoolClassPermission(AcademicRolePermission):
+    """HR may assign a class teacher without gaining general academic mutation rights."""
+
     def has_permission(self, request, view):
-        if request.method in permissions.SAFE_METHODS:
-            return bool(request.user and request.user.is_authenticated)
-        return IsHeadmasterOrAdmin().has_permission(request, view)
+        if super().has_permission(request, view):
+            return True
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role == Role.HR
+            and (
+                (view.action == "partial_update" and set(request.data) <= {"class_teacher"})
+                or view.action == "reassign_class_teacher"
+            )
+        )
 
 
 class SubjectViewSet(viewsets.ModelViewSet):
-    queryset = Subject.objects.prefetch_related("papers").all()
+    queryset = Subject.objects.prefetch_related("papers").order_by("name", "id")
     serializer_class = SubjectSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
     filterset_fields = ["level", "status"]
 
 
 class SubjectPaperViewSet(viewsets.ModelViewSet):
     queryset = SubjectPaper.objects.all()
     serializer_class = SubjectPaperSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
     filterset_fields = ["subject"]
 
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.prefetch_related("subjects").select_related("head_teacher__user").all()
     serializer_class = DepartmentSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR)
 
 
 class SchoolClassViewSet(viewsets.ModelViewSet):
@@ -59,8 +84,19 @@ class SchoolClassViewSet(viewsets.ModelViewSet):
         "subject_assignments__subject", "subject_assignments__teacher_assignments__teacher__user"
     )
     serializer_class = SchoolClassSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [SchoolClassPermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR, Role.BURSAR, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
     filterset_fields = ["level", "level_group"]
+
+    @action(detail=True, methods=["post"], url_path="reassign-class-teacher")
+    def reassign_class_teacher(self, request, pk=None):
+        target_class = self.get_object()
+        serializer = ReassignClassTeacherSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        teacher = get_object_or_404(Teacher, pk=serializer.validated_data["teacher_id"])
+        updated_class = reassign_class_teacher(target_class, teacher)
+        return Response(self.get_serializer(updated_class).data, status=200)
 
     @action(detail=True, methods=["post"], url_path="assign-teacher")
     def assign_teacher(self, request, pk=None):
@@ -96,23 +132,29 @@ class SchoolClassViewSet(viewsets.ModelViewSet):
 class ClassSubjectAssignmentViewSet(viewsets.ModelViewSet):
     queryset = ClassSubjectAssignment.objects.select_related("school_class", "subject")
     serializer_class = ClassSubjectAssignmentSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
     filterset_fields = ["school_class", "subject"]
 
 
 class ReportCardConfigViewSet(viewsets.ModelViewSet):
     """HM-managed: which assessment categories count toward report cards."""
 
-    queryset = ReportCardConfig.objects.all()
+    queryset = ReportCardConfig.objects.order_by("-year", "term", "id")
     serializer_class = ReportCardConfigSerializer
-    permission_classes = [ReadAllWriteHeadmasterOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER)
     filterset_fields = ["term", "year"]
 
 
 class ResultWindowViewSet(viewsets.ModelViewSet):
     """DOS-managed: submission windows per result category/term/year."""
 
-    queryset = ResultWindow.objects.all()
+    queryset = ResultWindow.objects.order_by("-year", "term", "result_type", "id")
     serializer_class = ResultWindowSerializer
-    permission_classes = [ReadAllWriteDOSOrAdmin]
+    permission_classes = [AcademicRolePermission]
+    read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.TEACHER)
+    write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
     filterset_fields = ["result_type", "term", "year"]

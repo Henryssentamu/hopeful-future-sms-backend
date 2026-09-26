@@ -5,7 +5,7 @@ from rest_framework.response import Response
 
 from apps.accounts.models import Role
 
-from .models import BroadcastScope, Notification
+from .models import BroadcastScope, Notification, NotificationReadReceipt
 from .serializers import NotificationSerializer
 
 
@@ -19,6 +19,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
         user = self.request.user
@@ -27,16 +28,19 @@ class NotificationViewSet(viewsets.ModelViewSet):
             scopes |= Q(broadcast_scope=BroadcastScope.ALL_TEACHERS)
         if user.role in (Role.DOS, Role.ADMIN, Role.HEADMASTER) or user.is_superuser:
             scopes |= Q(broadcast_scope=BroadcastScope.DOS)
-        return Notification.objects.filter(scopes)
+        return Notification.objects.filter(scopes).prefetch_related("read_receipts")
 
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         notification = self.get_object()
-        notification.read = True
-        notification.save(update_fields=["read"])
-        return Response(NotificationSerializer(notification).data)
+        NotificationReadReceipt.objects.get_or_create(notification=notification, user=request.user)
+        notification._prefetched_objects_cache.pop("read_receipts", None)
+        return Response(NotificationSerializer(notification, context={"request": request}).data)
 
     @action(detail=False, methods=["post"], url_path="mark-all-read")
     def mark_all_read(self, request):
-        self.get_queryset().update(read=True)
+        NotificationReadReceipt.objects.bulk_create(
+            [NotificationReadReceipt(notification=notification, user=request.user) for notification in self.get_queryset()],
+            ignore_conflicts=True,
+        )
         return Response({"detail": "All marked read."})
