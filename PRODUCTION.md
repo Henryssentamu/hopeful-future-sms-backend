@@ -25,7 +25,7 @@ period. No migration or seed command runs on server startup.
 Access logs go to stdout and errors to stderr. Access logs contain source IP,
 method, URL path, status, and duration, but omit query strings, headers, and
 bodies. Apply your platform's access controls and retention policy to these logs.
-Gunicorn's forwarded-header interpretation is disabled so Django's Phase 28
+Gunicorn's forwarded-header interpretation and administrative control socket are disabled so Django's Phase 28
 proxy configuration remains authoritative. The reverse proxy must sanitize
 forwarded headers and enforce request-size, buffering, and timeout limits.
 See the [Gunicorn settings reference](https://gunicorn.org/reference/settings/).

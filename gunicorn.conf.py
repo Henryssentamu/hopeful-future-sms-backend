@@ -18,4 +18,6 @@ access_log_format = '%(h)s %(m)s %(U)s %(s)s %(L)s'
 # SECURE_PROXY_SSL_HEADER policy; Gunicorn must not trust additional headers.
 secure_scheme_headers = {}
 forwarded_allow_ips = ""
-forwarder_headers = []
+forwarder_headers = ""
+# The read-only runtime does not need Gunicorn's administrative control socket.
+control_socket_disable = True

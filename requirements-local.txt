@@ -1,8 +1,7 @@
-# Used only for local (non-Docker) development on this machine, where the
-# system headers needed to compile mysqlclient aren't installed and we don't
-# have sudo. PyMySQL is pure-Python and shimmed in as MySQLdb (see
-# config/settings.py). The Docker image always uses real mysqlclient from
-# requirements.txt — this file is never used inside the container.
+# Pure-Python database-driver profile for local development and cPanel shared
+# hosting, where system headers needed to compile mysqlclient are unavailable.
+# config/__init__.py installs the PyMySQL compatibility shim. Docker continues
+# to use native mysqlclient from requirements.txt.
 Django>=5.0,<5.1
 djangorestframework>=3.15,<3.16
 djangorestframework-simplejwt>=5.3,<5.4

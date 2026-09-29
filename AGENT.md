@@ -182,7 +182,7 @@ The main configuration is `config/settings.py`.
 - Database: MySQL only; there is no SQLite fallback.
 - Default frontend CORS origin: `http://localhost:8080`.
 - Redis logical database 1 is used for cache; database 0 is used for Celery.
-- Login and token-refresh throttles use the shared Redis-backed Django cache. Their rates and trusted-proxy count are configured through the authentication variables in `.env.example`.
+- Login and token-refresh throttles use the shared Django cache: Redis by default, or the explicitly selected database cache on cPanel. Their rates and trusted-proxy count are configured through the authentication variables in `.env.example`.
 - Production enables SSL redirect, secure session/CSRF cookies, content-type protection, same-origin referrer/opener policy, frame denial, and configured HSTS. Media is served by Django only while `DEBUG` is enabled.
 
 Local environment values are documented in `.env.example`; the deliberately non-deployable production checklist is `production.env.example`. Never expose or commit real environment values.
@@ -726,7 +726,7 @@ Phase 28 separates local defaults from production startup. Production rejects de
 - The development Docker Compose file runs Django's development server. A separate production Gunicorn image and standalone Compose file are available; see `PRODUCTION.md` for their host-proxy topology and remaining deployment requirements.
 - The VPS production Compose file includes an optional Celery worker profile; shared hosting uses eager execution and no worker.
 - Celery executes eagerly by default.
-- Login and refresh endpoints have Redis-backed application throttling, but there is no gateway/WAF-level rate limit, distributed abuse monitoring, or account-compromise alerting. DRF's cache throttle is defense-in-depth and is not an absolute concurrency or denial-of-service control.
+- Login and refresh endpoints have shared-cache application throttling (Redis or the cPanel database cache), but there is no gateway/WAF-level rate limit, distributed abuse monitoring, or account-compromise alerting. DRF's cache throttle is defense-in-depth and is not an absolute concurrency or denial-of-service control.
 - Private media persistence, minimal liveness/readiness checks, and local container log rotation are implemented. Backup scheduling/restoration, off-host log collection, external monitoring/alerts, and real-domain verification still require hosting configuration.
 
 Production deployment should introduce secure secret management, HTTPS/security settings, a production WSGI/ASGI server, edge rate limiting, least-privilege infrastructure, backups, observability, and tested restoration procedures.
@@ -735,7 +735,7 @@ Production deployment should introduce secure secret management, HTTPS/security 
 
 Phase 28 makes production configuration fail safe. `DJANGO_ENVIRONMENT=production` enables the HTTPS policy and validates every access-critical value while Django settings load. An invalid deployment exits with `ImproperlyConfigured: Unsafe production configuration` and lists variable names/reasons without printing secrets. Development remains the default when `DJANGO_ENVIRONMENT` is absent.
 
-`production.env.example` is the copyable variable checklist. Its `.example` domains and `change-me` secrets are intentionally rejected; replace them rather than deploying the file unchanged. Store real values in the deployment platform's encrypted secret/config service, not Git, an image layer, logs, chat, or this guide.
+`production.env.example` is the copyable variable checklist. Its public domains reflect the approved school addresses, but its placeholder secrets and infrastructure values are intentionally non-deployable; replace them rather than deploying the file unchanged. Store real values in the deployment platform's encrypted secret/config service, not Git, an image layer, logs, chat, or this guide.
 
 ### Required production values
 
@@ -818,7 +818,7 @@ Start HSTS at `3600` seconds only after HTTPS works end-to-end, including the AP
 Before public traffic:
 
 1. Provision final backend/frontend DNS names and valid TLS certificates.
-2. Create the least-privilege database user/database and private Redis service; verify network access from the backend runtime.
+2. Create the least-privilege database user/database and the selected shared cache: private Redis for the VPS, or the database cache table for cPanel as described in `CPANEL.md`; verify access from the backend runtime.
 3. Put the required values in the platform secret/config store and confirm the frontend production build used the matching `VITE_API_BASE_URL`.
 4. Run these commands inside the exact configured backend image/runtime:
 
@@ -832,7 +832,7 @@ python manage.py migrate --plan
 5. Take and verify a restorable database backup before applying migrations, then run `python manage.py migrate` once through the controlled release process.
 6. Start the backend and verify HTTPS has no redirect loop, the API hostname is accepted, and HTTP redirects to HTTPS.
 7. From the real frontend origin, verify CORS preflight/login, token refresh, logout, and one permitted read for every role. Verify an unauthorized role remains denied.
-8. Verify Redis-backed login throttling and review logs without recording credentials or tokens.
+8. Verify login throttling against the selected shared cache and review logs without recording credentials or tokens.
 9. Increase HSTS only after monitoring confirms HTTPS stability. Never run `seed_demo_data` in production; Phase 28 blocks it even if invoked accidentally.
 
 With the safe first-rollout HSTS values (`3600`, subdomains `False`, preload `False`), the tagged deployment check must exit successfully and report only Django advisories `security.W005` and `security.W021`. Those advisories accurately record that subdomains/preload are being deferred; do not silence them. Any other security warning must be resolved before traffic opens. After every subdomain is permanently HTTPS-ready and the school approves preload, change HSTS to `31536000`/`True`/`True` and require the mature strict gate:
@@ -1008,7 +1008,7 @@ Re-run these checks after changes; this section is historical context, not a sub
 - Production settings fail while importing if required variables are missing or if debug mode, placeholder/weak secrets, root/weak database credentials, wildcard/local/example hosts, non-HTTPS frontend origins, incomplete proxy/HSTS values, invalid Redis numbers, or malformed authentication throttle rates are supplied. Error output names the settings to correct without printing their secret contents.
 - The production profile automatically enables SSL redirect, secure session/CSRF cookies, HTTP-only session cookies, `Lax` same-site cookies, content-type protection, same-origin referrer/opener policy, and frame denial. HSTS requires at least 3600 seconds; subdomain/preload adoption remains an explicit staged decision.
 - `DJANGO_TRUST_PROXY_SSL_HEADER` and `DRF_NUM_PROXIES` are independent explicit production choices. Preserve the topology rules in “Production Deployment Configuration”; weakening SSL redirect or trusting unsanitized forwarded headers is not an acceptable fix for a redirect or throttling problem.
-- `production.env.example` is a non-deployable backend checklist with rejected placeholder domains/secrets. The frontend companion template supplies `VITE_API_BASE_URL`; both agent guides document exact domain/origin alignment, value generation, deployment preflight, HSTS rollout, access verification, and symptom-based troubleshooting.
+- `production.env.example` is a non-deployable backend checklist with approved public domains and rejected placeholder secrets/infrastructure values. The frontend companion template supplies `VITE_API_BASE_URL`; both agent guides document exact domain/origin alignment, value generation, deployment preflight, HSTS rollout, access verification, and symptom-based troubleshooting.
 - `seed_demo_data` raises `CommandError` immediately in production, including without `--reset`. Demo credentials and fixtures cannot be introduced through that management command once the production profile is active.
 - This phase changes configuration behavior only: no model migration, stored data, route, serializer, permission, or normal API payload changed. Production serving, media, backups, monitoring, health checks, and a Celery worker remain later operational work.
 - Verification baseline: 15/15 focused production configuration/transport tests and 74/74 complete backend tests pass; local `manage.py check`, Python compilation, migration-drift checks, and a simulated mature-production `check --deploy --tag security --fail-level WARNING` pass. Frontend type checking, lint, production build, 44/44 unit tests, and a strict no-retry run of all 41 browser scenarios pass.
@@ -1018,12 +1018,13 @@ Re-run these checks after changes; this section is historical context, not a sub
 - `Dockerfile.production` uses a separate dependency build stage and runs Gunicorn as non-root UID/GID 10001. `requirements-production.txt` adds pinned Gunicorn without changing local development dependencies. `.dockerignore` excludes environment files, local runtime artifacts, and Git metadata from image build contexts.
 - `compose.production.yml` is standalone, not a development override. It requires `PRODUCTION_ENV_FILE`, forces production/debug-off settings, binds only host loopback port 8001, drops capabilities, and uses a read-only root filesystem with writable `/tmp`. Provision reachable private MySQL/Redis services and a same-host TLS reverse proxy separately.
 - `gunicorn.conf.py` starts two synchronous workers by default, configurable with `WEB_CONCURRENCY`. Worker timeout is 60 seconds, graceful shutdown is 30 seconds, and Compose allows 45 seconds before forced termination. Startup never applies migrations or seeds data.
-- Django's explicit trusted-proxy policy remains authoritative; Gunicorn's additional forwarded-header interpretation is disabled. Access logs omit query strings, headers, and bodies. Server logs go to stdout/stderr for platform collection.
+- Django's explicit trusted-proxy policy remains authoritative; Gunicorn's additional forwarded-header interpretation is disabled with an empty `forwarder_headers` string; its administrative control socket is disabled for the read-only runtime. Access logs omit query strings, headers, and bodies. Server logs go to stdout/stderr for platform collection.
 - `PRODUCTION.md` documents the VPS build, preflight, controlled migration/startup, proxy topology, and rollback boundaries. The image collects static files, Compose mounts private persistent media, and an optional worker profile provides Celery. Health probes and bounded local logs are implemented; real infrastructure, backups, centralized logging/monitoring, and public-domain verification remain external acceptance gates.
 - This phase adds server packaging only; API contracts and frontend behavior are unchanged. Existing development Compose behavior remains available.
 
 ## Shared Hosting and Operational Deployment Support
 
+- The user will perform the initial installation through cPanel (File Manager, Setup Python App, and its available terminal/management controls); do not assume an SSH connection is configured. Follow `CPANEL.md` for the controlled release.
 - The first deployment target is Namecheap shared hosting with cPanel; Linode is the later VPS target. The portal is `https://www.hopefulfuture.ac.ug/schoolsystem/`, the API base is `https://api.hopefulfuture.ac.ug/api`, and the school website remains at its existing root. Backend CORS/CSRF origin values are `https://www.hopefulfuture.ac.ug` without a path. `CPANEL.md` is the shared-host runbook, while `PRODUCTION.md` and the production Compose file require a Docker-capable VPS.
 - `passenger_wsgi.py` provides the cPanel `application` entry point. `requirements-cpanel.txt` reuses the pure-Python PyMySQL dependency profile. Select Python 3.12 and verify the account's SQL compatibility before accepting data.
 - `DJANGO_CACHE_BACKEND` is `redis` by default or explicitly `database`. Database mode uses Django DatabaseCache and the `sms_cache` table, created with `manage.py createcachetable`, for cross-process throttling. It requires eager Celery, omits Redis production requirements, and preserves HTTPS, secret, database, and authentication-rate validation. Do not silently fall back to local-memory caching.
@@ -1031,6 +1032,15 @@ Re-run these checks after changes; this section is historical context, not a sub
 - `GET`/`HEAD /health/live/` returns uncached `{"status":"ok"}` without dependency access. `/health/ready/` verifies SQL and the selected cache and returns minimal HTTP 503 on dependency failure. Only these exact paths bypass SSL redirect for internal probes; the VPS proxy template blocks them publicly. cPanel external monitoring must use HTTPS.
 - The VPS runtime uses a private media volume, collected static assets, bounded local container logs, and an optional `worker` profile. `deploy/nginx.conf.example` is an unconfigured host-proxy template with sanitized headers and edge authentication limits.
 - Database-cache throttles remain approximate under concurrent requests and add SQL load. External backups, restore rehearsal, provider log collection/alerts, domain/TLS configuration, and real-host smoke tests are separate deployment acceptance requirements; local tests cannot certify those services.
+
+### Release packaging and verified baseline
+
+- `scripts/package_cpanel.py` produces a source-only ZIP from an explicit allowlist and Python files under `apps`/`config`. It rejects symlinks or paths outside the repository and refuses to overwrite an existing archive. Real environment files, local data, logs, virtual environments, and Git metadata are excluded. Regenerate the archive after source or included-guide changes.
+- The VPS image validates Gunicorn configuration during its build before collecting static assets. Synthetic test settings are used for local verification; they are never deployment credentials.
+- Verified on 2026-09-29: all 85 backend tests passed with MySQL; Django system checks passed and migration drift reported no changes. Passenger imported successfully in production mode with the shared database cache.
+- The production image built successfully. An isolated non-root, read-only container verified liveness HTTP 200, readiness HTTP 503 when dependencies are unavailable, API HTTP-to-HTTPS redirect HTTP 301, and graceful shutdown. This failure-path check does not establish healthy connectivity to production SQL/cache services.
+- Companion frontend checks passed: TypeScript, lint, 44 unit tests, 41 application browser scenarios, and four compiled `/schoolsystem/` deployment scenarios with mocked API responses and zero retries.
+- Local release preparation is complete; no live deployment or existing-school-website modification has been performed. Actual cPanel provisioning, uploads, secret configuration, database setup, DNS/TLS, backup/restore rehearsal, monitoring, and real-origin workflow checks remain required before declaring the deployment complete.
 
 ## Pre-Change Checklist
 

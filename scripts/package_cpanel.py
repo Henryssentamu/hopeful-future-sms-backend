@@ -8,7 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_FILES = (
     "manage.py", "passenger_wsgi.py", "requirements-cpanel.txt",
-    "requirements-local.txt", "CPANEL.md", "AGENT.md", "AGENTS.md",
+    "requirements-local.txt", "CPANEL.md", "PRODUCTION.md", "AGENT.md", "AGENTS.md",
     "cpanel.env.example",
 )
 
