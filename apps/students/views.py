@@ -1,4 +1,5 @@
-from django.db import models
+from django.db import models, transaction
+from django.http import FileResponse
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied
@@ -92,9 +93,24 @@ class StudentViewSet(viewsets.ModelViewSet):
         return StudentSerializer
 
     def get_permissions(self):
-        if self.action in ("teaching_roster", "update_comment"):
+        if self.action in ("teaching_roster", "update_comment", "photo"):
             return [permissions.IsAuthenticated()]
         return super().get_permissions()
+
+    @action(detail=True, methods=["get"])
+    def photo(self, request, pk=None):
+        if request.user.role == Role.BURSAR and not request.user.is_superuser:
+            raise PermissionDenied("Photo access requires academic permission.")
+        student = self.get_object()
+        if not student.photo_file:
+            raise NotFound("No uploaded photo.")
+        try:
+            response = FileResponse(student.photo_file.open("rb"), content_type="image/jpeg")
+        except FileNotFoundError:
+            raise NotFound("Photo is unavailable.")
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @action(detail=False, methods=["get"], url_path="teaching-roster")
     def teaching_roster(self, request):
@@ -210,6 +226,22 @@ class TermEnrollmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return _academic_student_scope(self.queryset, self.request.user)
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        from apps.finance.ledger import synchronize_accounts
+        student = serializer.validated_data["student"]
+        Student.objects.select_for_update().get(pk=student.pk)
+        enrollment = serializer.save()
+        synchronize_accounts(enrollment.student_id, self.request.user)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        from apps.finance.ledger import synchronize_accounts
+        student_id = serializer.instance.student_id
+        Student.objects.select_for_update().get(pk=student_id)
+        enrollment = serializer.save()
+        synchronize_accounts(enrollment.student_id, self.request.user)
 
 
 class TermRecordViewSet(viewsets.ModelViewSet):

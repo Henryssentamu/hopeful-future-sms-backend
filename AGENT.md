@@ -68,7 +68,7 @@ This backend is the system of record and security boundary. The frontend present
 
 ### System boundaries
 
-The current project does not yet provide a student/parent self-service portal, payroll, library management, boarding/dormitory management, inventory procurement, automatic timetable generation, online payment-provider integration, immutable accounting ledger, or production-ready messaging delivery. Do not assume these exist; treat them as new features requiring explicit product and cross-stack design.
+The current project does not yet provide a student/parent self-service portal, payroll, library management, boarding/dormitory management, inventory procurement, automatic timetable generation, online payment-provider integration, a general double-entry accounting ledger or reversal workflow, or production-ready messaging delivery. Do not assume these exist; treat them as new features requiring explicit product and cross-stack design.
 
 ## Related Frontend and Cross-Stack Documentation Rule
 
@@ -179,7 +179,7 @@ The main configuration is `config/settings.py`.
 - API schema: `/api/schema/`.
 - Swagger UI: `/api/docs/`.
 - Time zone: `Africa/Kampala`.
-- Database: MySQL only; there is no SQLite fallback.
+- Database: MySQL/MariaDB through Django’s MySQL backend; there is no SQLite fallback. Every connection adds `STRICT_TRANS_TABLES` to its session SQL mode while preserving existing modes. This prevents silent truncation on shared hosts with non-strict defaults without changing global server settings.
 - Default frontend CORS origin: `http://localhost:8080`.
 - Redis logical database 1 is used for cache; database 0 is used for Celery.
 - Login and token-refresh throttles use the shared Django cache: Redis by default, or the explicitly selected database cache on cPanel. Their rates and trusted-proxy count are configured through the authentication variables in `.env.example`.
@@ -329,7 +329,7 @@ The following sections describe what each Django app owns, how its files coopera
 
 **Models:**
 
-- `Subject` stores code, unique name, O-/A-Level applicability/type, status, cached enrollment count, and description.
+- `Subject` stores code, unique name, O-/A-Level applicability/type, category, status, cached enrollment count, and description. The repeatable NCDC catalogue loader and school-editable categories are documented below.
 - `SubjectPaper` normalizes papers belonging to a subject and is unique per subject/paper code.
 - `Department` groups subjects and optionally assigns a Teacher as head.
 - `SchoolClass` is an actual stream/class with level group, stream, education level, and optional class teacher.
@@ -424,7 +424,7 @@ Class-teacher reassignment is exposed as `POST /api/academics/classes/{target_cl
 
 - `FeeStructure` defines tuition by level group/term/year; `FeeExtra` defines optional attached charges.
 - `StudentFeeAssignment` records a student's opted extras for a term/year.
-- `FeePayment` records amount, date, method, unique receipt, and notes.
+- `FeePayment` records immutable receipt details, a server-generated unique number, request identity, class snapshot, recorder, and payment metadata. `StudentFeeAccount`, `PaymentAllocation`, and `OpeningBalanceEvidence` preserve term charges, settlements, and imported history.
 - `ExpenditureCategory` describes grouped recurring/one-off spending expectations.
 - `ExpenditureRecord` records actual spending, payee, kind, free-text period, and status.
 - `IncomeRecord` stores non-fee income and rejects `School Fees`, because fee income is derived from FeePayment.
@@ -434,13 +434,13 @@ Class-teacher reassignment is exposed as `POST /api/academics/classes/{target_cl
 
 **Serializers:** Resource serializers expose nested fee extras or readable student/category names where needed. Income validation duplicates the model-level protection against storing school-fee income.
 
-**Views and routes:** CRUD viewsets live under `/api/finance/`; authenticated users currently read, while Bursar/Admin/Headmaster write. Computed endpoints return student fee status, student requirement status, and income/expenditure overview with term/year and optional filters.
+**Views and routes:** All finance reads and writes require Bursar/Admin/Headmaster. Payments, opening balances, and historical evidence support creation and read-only retrieval; receipts also expose a controlled legacy-reconciliation action. Student statements and computed status endpoints expose period balances and allocation history. Other finance resources retain their existing CRUD routes.
 
-**Services:** Helpers parse free-text periods, locate fee structures, calculate total due and paid, classify payment/requirement status, and total fee income. Core previous-term logic supplies outstanding balances. Student term-enrollment services indicate whether a student is enrolled for the selected period.
+**Services:** `ledger.py` owns transactionally serialized charges, receipt creation, allocations, retained credit, opening balances, and legacy reconciliation. `services.py` owns financial summaries and requirement classification. Previous balances include all earlier recorded terms; exact historical enrollment and fee structures establish charges.
 
 **Cross-app connections:** Finance references Student and academic LevelGroup, uses core term values and period helpers, and exposes CRUD plus computed reporting endpoints to authorized clients.
 
-**Change cautions:** Financial reads are currently broadly available to authenticated users. Preserve FeePayment as the only source of fee-income totals. Free-text expenditure period parsing is fragile. Important finance mutations need audit/reversal/reconciliation design. Avoid floating point for money; current positive integer UGX convention is deliberate.
+**Change cautions:** Preserve financial role restrictions and FeePayment as the only source of fee-income totals. Preserve posted charge snapshots and allocation history. Reversals, refunds, and a general accounting approval chain are not implemented. Free-text expenditure period parsing remains fragile. Money uses integer UGX.
 
 ### `apps.timetable` — schedule structure and conflict-safe manual allocation
 
@@ -624,7 +624,7 @@ Fee structures are keyed by level group, term, and year. Tuition is common to st
 Student fee status is computed from:
 
 ```text
-tuition + opted extras - payments
+recorded term charge - payment allocations to that term
 ```
 
 School-fee income is always computed from `FeePayment`. It must not be stored as an `IncomeRecord`; both serializer and model validation enforce this rule.
@@ -717,7 +717,7 @@ Fee status, requirement status, report-card ranking, stream comparison, and resu
 
 `ExpenditureRecord.period` is free text, and summary code infers the term/year from the text or transaction date. Prefer explicit normalized term and year fields for reliable reporting.
 
-There is no visible immutable ledger, reversal workflow, reconciliation, approval chain, or comprehensive audit trail for financial mutations. These should be considered before production financial use.
+Receipts and allocations now preserve student-fee settlement history, and held legacy receipts have an explicit reconciliation action. Reversals, refunds, charge adjustments, a general approval chain, and comprehensive auditing of other finance resources remain outside the implemented workflow.
 
 ### Production operations
 
@@ -1028,10 +1028,24 @@ Re-run these checks after changes; this section is historical context, not a sub
 - The first deployment target is Namecheap shared hosting with cPanel; Linode is the later VPS target. The portal is `https://www.hopefulfuture.ac.ug/schoolsystem/`, the API base is `https://api.hopefulfuture.ac.ug/api`, and the school website remains at its existing root. Backend CORS/CSRF origin values are `https://www.hopefulfuture.ac.ug` without a path. `CPANEL.md` is the shared-host runbook, while `PRODUCTION.md` and the production Compose file require a Docker-capable VPS.
 - `passenger_wsgi.py` provides the cPanel `application` entry point. `requirements-cpanel.txt` reuses the pure-Python PyMySQL dependency profile. Select Python 3.12 and verify the account's SQL compatibility before accepting data.
 - `DJANGO_CACHE_BACKEND` is `redis` by default or explicitly `database`. Database mode uses Django DatabaseCache and the `sms_cache` table, created with `manage.py createcachetable`, for cross-process throttling. It requires eager Celery, omits Redis production requirements, and preserves HTTPS, secret, database, and authentication-rate validation. Do not silently fall back to local-memory caching.
-- `DJANGO_STATIC_ROOT` and `DJANGO_MEDIA_ROOT` accept absolute deployment paths. Static assets may be public; media remains private. The current product stores photo URLs and does not expose a general upload/download API.
+- `DJANGO_STATIC_ROOT` and `DJANGO_MEDIA_ROOT` accept absolute deployment paths. Static assets may be public; media remains private. Student registration accepts private device-photo uploads, served only by the authenticated, academically scoped student photo endpoint; legacy photo URLs remain readable.
 - `GET`/`HEAD /health/live/` returns uncached `{"status":"ok"}` without dependency access. `/health/ready/` verifies SQL and the selected cache and returns minimal HTTP 503 on dependency failure. Only these exact paths bypass SSL redirect for internal probes; the VPS proxy template blocks them publicly. cPanel external monitoring must use HTTPS.
 - The VPS runtime uses a private media volume, collected static assets, bounded local container logs, and an optional `worker` profile. `deploy/nginx.conf.example` is an unconfigured host-proxy template with sanitized headers and edge authentication limits.
 - Database-cache throttles remain approximate under concurrent requests and add SQL load. External backups, restore rehearsal, provider log collection/alerts, domain/TLS configuration, and real-host smoke tests are separate deployment acceptance requirements; local tests cannot certify those services.
+
+### Confirmed cPanel installation details
+
+- The school domain is an additional domain on the hosting account whose main domain is `sisit.it.com`. The backend application root is `/home/sisitzyt/hopeful-future-sms`; its public API document root is `/home/sisitzyt/api.hopefulfuture.ac.ug`. Keep backend source and secrets in the private application root.
+- The existing school document root is `/home/sisitzyt/public_html/hopefulfuture.ac.ug`; portal assets belong only in its `schoolsystem/` subdirectory, not directly in `/public_html/schoolsystem/`.
+- On premium65, Namecheap support confirmed that forwarded protocol reflects the actual HTTP/HTTPS connection and client spoofed protocol values are not trusted. Support also tested that the actual connection IP reaches the application without the spoofed IP. This deployment uses `DJANGO_TRUST_PROXY_SSL_HEADER=True` and `DRF_NUM_PROXIES=1`. Reverify if the proxy/CDN topology changes; do not generalize this choice to all providers.
+- Python 3.12.14 and cPanel dependency installation were confirmed by the operator; production settings checks passed and security checks returned only the expected W005/W021 staged-HSTS advisories. The operator applied the strict-mode settings update and confirmed a clean MariaDB database check. All initial migrations, database-cache table creation, the A-Level catalogue load, and static collection then completed successfully. Both live health endpoints returned `ok`, and Django Admin login and styling were verified by the operator on 2026-10-07. On 2026-10-08, the operator confirmed successful portal login and page loading at `/schoolsystem/`, and confirmed the existing school website remains unchanged. These are operator-reported smoke checks; live student/finance workflows, role-specific access, backups/restore validation, and monitoring acceptance remain outstanding.
+- The database-password minimum remains 20 characters. Never store real passwords or Django keys in these guides. Keep the application stopped during initial configuration and migrations.
+
+### Strict SQL mode verification
+
+- The connection initializer is exercised against both empty SQL mode and a non-strict mode containing `NO_ENGINE_SUBSTITUTION`, confirming strict mode is added and existing modes survive.
+- On 2026-10-07, all 14 focused database-mode and environment-profile tests passed. Local database checks passed with both mysqlclient and the cPanel PyMySQL driver against MySQL. The full backend suite also passed all 107 tests. Migration drift is clean; this fix requires no schema migration.
+- These local checks do not certify the provider's MariaDB connection. After replacing the hosted `config/settings.py`, require `check --database default` and `migrate --plan` to complete without `mysql.W002` before applying the initial migrations.
 
 ### Release packaging and verified baseline
 
@@ -1041,6 +1055,43 @@ Re-run these checks after changes; this section is historical context, not a sub
 - The production image built successfully. An isolated non-root, read-only container verified liveness HTTP 200, readiness HTTP 503 when dependencies are unavailable, API HTTP-to-HTTPS redirect HTTP 301, and graceful shutdown. This failure-path check does not establish healthy connectivity to production SQL/cache services.
 - Companion frontend checks passed: TypeScript, lint, 44 unit tests, 41 application browser scenarios, and four compiled `/schoolsystem/` deployment scenarios with mocked API responses and zero retries.
 - Local release preparation is complete; no live deployment or existing-school-website modification has been performed. Actual cPanel provisioning, uploads, secret configuration, database setup, DNS/TLS, backup/restore rehearsal, monitoring, and real-origin workflow checks remain required before declaring the deployment complete.
+
+## Student Photos, Subject Catalogue, and Fee History
+
+### Student photographs
+
+- Student create/update accepts multipart `photo` data. `photo_url` is read-only legacy data; `has_photo` indicates a private uploaded image. Storage paths are never serialized.
+- Pillow validates actual JPEG, PNG, or WebP content (maximum 5 MiB and 20 million pixels), applies EXIF orientation, removes metadata by re-encoding, and stores a UUID-named JPEG bounded to 1200×1200. Install the updated requirements in every runtime.
+- `GET /api/students/{id}/photo/` streams the image with `private, no-store` and `nosniff`. Academic role/object scope applies; Bursar/HR/unrelated teachers cannot access it. Report-card and teacher student DTOs include `has_photo` where authorized.
+- Keep `DJANGO_MEDIA_ROOT` writable and outside public document roots; back it up with SQL. Old/replaced file cleanup is not automated.
+
+### A-Level catalogue and categories
+
+- `python manage.py load_advanced_subjects` or authorized `POST /api/academics/subjects/load-advanced-catalogue/` loads the 40-subject [NCDC Higher Secondary menu](https://ncdc.go.ug/directorates/) checked on 2026-10-01. This is reference data, not demo seeding, and the command is permitted in production.
+- The loader preserves existing identities, codes, papers, and manually assigned categories; known alternative names are matched. New entries use internal `NCDC-AL-*` identifiers, never claimed to be UNEB examination codes. Teaching allocations and examination paper definitions require school configuration.
+- Categories are `Sciences`, `Arts`, `Languages`, `Technical`, `General`, or `Unclassified`; they are school-editable browsing aids, not official subject-combination eligibility rules. The subjects endpoint supports `category` filtering.
+
+### Student fee accounts and automatic settlement
+
+- A new student has zero previous balance unless actual earlier term enrollment/charges or an explicit imported opening balance exists. Never invent debt from the current class or reuse another term's fee structure.
+- `StudentFeeAccount` snapshots each term's historical class, tuition/extras or imported net balance, source, notes, and recorder. Posted charges remain stable after promotion or later fee changes. Fee structures/extra assignments with posted charges cannot be rewritten through their guarded API operations.
+- Every payment requires a client UUID `request_id`; an identical retry returns the original receipt, and changed details using that UUID are rejected. The server generates a unique `HFSS-*` receipt. Generic payment update/delete and Django Admin payment mutation are disabled.
+- Within a transaction locked on the student, payment first settles the selected term, then applies excess to the oldest outstanding accounts. Unused funds remain credit. Later enrollment, fee-structure creation, or opening-balance creation applies available credit automatically. No duplicate cash receipt is created for a transfer.
+- Every allocation retains its receipt, destination term/year/class, amount, resulting term balance, reason, and timestamp. The original payment amount/date/method/notes and recorder remain traceable. Earlier-term payments require actual outstanding debt; `arrears_only` additionally restricts the target to before the active academic period.
+- `GET /api/finance/students/{id}/statement/` returns all term accounts, receipts/allocations, opening evidence, outstanding total, and retained credit. `payments/?receipt_no=...` traces a receipt across periods. Student status returns cumulative `prev_balance`, selected-term paid/balance, credit, historical class/level, and whether a term charge exists.
+- `POST /api/finance/opening-balances/` imports a positive net amount for an earlier term with historical class and required provenance notes. Duplicate accounts and periods with existing receipts are rejected. `opening-balance-evidence/` appends dated historical charges/payments and references where available; evidence explains the imported net amount and never counts as new cash or reduces the balance again.
+- Migration `finance.0004` preserves old receipt numbers and allocates only against exact historical enrollment/prices. Receipts without sufficient historical context are held with `requires_reconciliation`; they cannot be spent as credit. After recording original enrollment and full charges, `POST /api/finance/payments/{id}/reconcile/` releases and allocates a held receipt idempotently. An imported net opening balance cannot substitute for its original full charge.
+- Fee-income reports continue summing original FeePayment amounts by their designated period, while account balances sum destination allocations. Opening evidence and internal allocations are never new income. A general reversal/refund or charge-adjustment workflow is not yet available.
+
+### Upgrade and verification
+
+Install updated dependencies, review/back up the database, apply migrations, then load the catalogue with `load_advanced_subjects`. Verify private media storage and the real-host photo/payment workflows before accepting production data. Regenerate cPanel packages after these source changes; archives produced before this update are stale. The verification results below supersede the earlier historical release baselines for these changes.
+
+### Verification of student and finance updates — 2026-10-03
+
+- Django system checks and migration-drift checks pass. The complete backend run passed 105 tests; the subsequent 18-test finance/catalogue run also passed and includes the newly added receipt-backfill test and final catalogue conflict-handling changes.
+- Frontend TypeScript and ESLint checks pass; all 46 unit tests, 45 application browser scenarios, and four compiled `/schoolsystem/` deployment scenarios pass without retries. Browser API responses are mocked; backend tests exercise MySQL-backed behaviour.
+- The local development database was backed up before applying the new migrations, and the NCDC catalogue loaded successfully. No production database or school website was changed. Existing production acceptance and cPanel package-regeneration requirements still apply.
 
 ## Pre-Change Checklist
 
@@ -1071,3 +1122,11 @@ Before handing off a change:
 - Frontend `AGENT.md` is updated when the shared change affects frontend behavior.
 - Both guides are updated where a shared contract or end-to-end workflow changed.
 - No commit, push, or completion claim leaves a known backend/frontend incompatibility undocumented or unresolved.
+
+
+## O-Level catalogue update — 2026-10-08
+
+- `load_ordinary_subjects` and authorized POST `/api/academics/subjects/load-ordinary-catalogue/` merge the 35 individual O-Level subjects published at https://ncdc.go.ug/directorates/ (checked 2026-10-08). Admin, Headmaster and DOS can load the menu; other roles cannot write it.
+- Codes `NCDC-OL-xx` are internal identifiers, not UNEB examination codes. Loading is atomic and repeatable; existing aliases, IDs, codes, papers, categories, inactive status and configured O-Level types are preserved. Shared A-Level subjects gain O-Level availability; History & Political Education and O-Level ICT remain separate from History and Principal/Subsidiary ICT.
+- Seven subjects compulsory throughout S1–S4 default to Compulsory; other choices default to Optional. This is a subject menu, not automatic curriculum compliance: configure additional S1–S2 requirements, religious alternatives and school offerings through class subject assignments. No papers or enrollment are created by loading.
+- Frontend offers separate O-Level/A-Level load buttons and retains category filters. O-Level success refreshes the list and clears filters to show O-Level choices. No schema migration or dependency change is required. Live installation of this update is still pending.

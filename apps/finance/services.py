@@ -1,19 +1,12 @@
-"""
-Port of the finance business logic scattered across src/pages/Accounts.tsx
-and src/data/mockData.ts. `getFeeStructure`'s fallback-to-most-recent
-behavior, the "School Fees income is always summed from FeePayment, never
-stored" derivation rule, and the free-text period-parsing calendar mapping
-are all preserved here exactly.
-"""
+"""Finance summaries, exact-period fee lookups, and requirement status."""
 
 import re
 
 from django.db.models import Sum
 
-from apps.academics.models import LevelGroup
 from apps.core.models import FinanceTerm
 
-from .models import FeePayment, FeeStructure, PaymentStatus, RequirementStatus, StudentFeeAssignment
+from .models import FeePayment, FeeStructure, PaymentStatus, RequirementStatus
 
 _MONTH_TO_TERM = {
     "jan": FinanceTerm.TERM_1, "feb": FinanceTerm.TERM_1, "mar": FinanceTerm.TERM_1, "apr": FinanceTerm.TERM_1,
@@ -63,39 +56,24 @@ def extract_term_from_period(period: str | None, date: str | None = None) -> str
 
 
 def get_fee_structure(level_group: str, term: str, year: int) -> FeeStructure | None:
-    """Port of getFeeStructure(): exact (level_group, term, year) match, else
-    the most-recently-defined structure for that level_group (sorted by
-    year desc, then term desc) so a newly-activated term still shows a
-    sensible default rather than nothing."""
-    exact = FeeStructure.objects.filter(level_group=level_group, term=term, year=year).first()
-    if exact:
-        return exact
-    term_order = {FinanceTerm.TERM_1: 1, FinanceTerm.TERM_2: 2, FinanceTerm.TERM_3: 3}
-    candidates = list(FeeStructure.objects.filter(level_group=level_group))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda f: (f.year, term_order[f.term]), reverse=True)
-    return candidates[0]
+    """Never borrow another term's prices to invent a historical charge."""
+    return FeeStructure.objects.filter(level_group=level_group, term=term, year=year).first()
 
 
 def student_due(student, term: str, year: int) -> int:
-    """Port of studentDue(): tuition + the sum of this student's opted extras
-    for that term, resolved via the student's LEVEL GROUP fee structure."""
-    level_group = student.school_class.level_group
-    fs = get_fee_structure(level_group, term, year)
-    if not fs:
-        return 0
-    assignment = StudentFeeAssignment.objects.filter(student=student, term=term, year=year).first()
-    extras_total = sum(e.amount for e in assignment.opted_extras.all()) if assignment else 0
-    return fs.tuition + extras_total
+    from .ledger import account_rows
+    return next((row["due"] for row in account_rows(student) if row["term"] == term and row["year"] == year), 0)
 
 
 def paid_by_student(student, term: str, year: int) -> int:
-    return FeePayment.objects.filter(student=student, term=term, year=year).aggregate(total=Sum("amount"))["total"] or 0
+    from .models import PaymentAllocation
+    return PaymentAllocation.objects.filter(account__student=student, account__term=term, account__year=year).aggregate(total=Sum("amount"))["total"] or 0
 
 
 def payment_status(due: int, paid: int) -> str:
     """Port of paymentStatus()."""
+    if due == paid:
+        return PaymentStatus.CLEARED
     if paid == 0:
         return PaymentStatus.UNPAID
     if paid < due:

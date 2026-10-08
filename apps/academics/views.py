@@ -2,6 +2,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 
 from apps.accounts.models import Role
 from apps.staff.models import Teacher
@@ -59,7 +60,25 @@ class SubjectViewSet(viewsets.ModelViewSet):
     permission_classes = [AcademicRolePermission]
     read_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS, Role.HR, Role.TEACHER)
     write_roles = (Role.ADMIN, Role.HEADMASTER, Role.DOS)
-    filterset_fields = ["level", "status"]
+    filterset_fields = ["level", "status", "category"]
+
+    @action(detail=False, methods=["post"], url_path="load-advanced-catalogue")
+    def load_advanced_catalogue(self, request):
+        from .catalogue import load_advanced_subjects
+        try:
+            load_advanced_subjects()
+        except ValueError as error:
+            raise ValidationError(str(error)) from error
+        return Response({"detail": "NCDC A-Level subject menu loaded."})
+
+    @action(detail=False, methods=["post"], url_path="load-ordinary-catalogue")
+    def load_ordinary_catalogue(self, request):
+        from .catalogue import load_ordinary_subjects
+        try:
+            load_ordinary_subjects()
+        except ValueError as error:
+            raise ValidationError(str(error)) from error
+        return Response({"detail": "NCDC O-Level subject menu loaded."})
 
 
 class SubjectPaperViewSet(viewsets.ModelViewSet):

@@ -1,0 +1,9 @@
+O-Level catalogue update
+
+Back up the current backend apps/academics directory and portal schoolsystem directory first.
+1. Extract backend-olevel-update.zip into /home/sisitzyt/hopeful-future-sms, replacing matching files. This patch contains no credentials or database settings.
+2. Restart the Python app in cPanel. No migrations or pip install needed.
+3. Extract portal-schoolsystem.zip into /home/sisitzyt/public_html/hopefulfuture.ac.ug/schoolsystem/, replacing matching files and including .htaccess. Keep the main school website files unchanged.
+4. Reload the portal and click Subjects > Load NCDC O-Level subjects.
+5. Select class offerings and configure papers separately. S1-S2 and S3-S4 have different compulsory choices.
+Rollback: restore the backed-up code and portal files, then restart the Python app. Catalogue loading preserves existing records and adds subjects; reverting code does not remove added subjects.

@@ -1,0 +1,15 @@
+Strict-mode connection update
+
+Keep the cPanel Python app stopped.
+Back up the existing config/settings.py within the private application folder.
+Upload this settings.py to /home/sisitzyt/hopeful-future-sms/config/settings.py,
+replacing the previous file. Do not upload it to public_html or the project root.
+No environment secrets or database passwords change.
+
+In the activated application terminal run:
+DJANGO_ENVIRONMENT=production python manage.py check --database default
+DJANGO_ENVIRONMENT=production python manage.py migrate --plan
+
+Both commands are read-only. Confirm mysql.W002 has disappeared before migrations.
+The connection now adds STRICT_TRANS_TABLES while preserving existing SQL modes.
+This changes only application database sessions, not global server settings.

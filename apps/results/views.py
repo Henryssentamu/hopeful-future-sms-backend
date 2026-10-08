@@ -357,6 +357,7 @@ class ReportCardView(APIView):
                 "id": student.id, "name": student.name, "student_number": student.student_number,
                 "class_name": historical_class.name, "level": enrollment.level, "combination": enrollment.combination,
                 "photo_url": student.photo_url,
+                "has_photo": bool(student.photo_file),
             },
             "marks": [{"subject_id": m.subject_id, "subject_name": m.subject_name, "score": m.score, "grade": m.grade} for m in marks],
             "summary": {

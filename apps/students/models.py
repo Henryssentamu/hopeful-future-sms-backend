@@ -46,6 +46,7 @@ class Student(models.Model):
     location = models.CharField(max_length=150, blank=True)
     enrollment_date = models.DateField()
     photo_url = models.URLField(blank=True)
+    photo_file = models.FileField(upload_to="student-photos/", blank=True)
 
     class Meta:
         ordering = ["name"]

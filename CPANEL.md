@@ -15,6 +15,15 @@ Read the complete production configuration runbook in `AGENT.md` first.
 Never deploy example secrets or domains. This document is a setup procedure,
 not evidence that the hosting account has been provisioned or verified.
 
+For the confirmed premium65 account, use private application root
+`/home/sisitzyt/hopeful-future-sms`, API document root
+`/home/sisitzyt/api.hopefulfuture.ac.ug`, and portal directory
+`/home/sisitzyt/public_html/hopefulfuture.ac.ug/schoolsystem/`.
+The school domain shares the account with main domain `sisit.it.com`.
+Namecheap support confirmed sanitized protocol/client-IP forwarding for this
+installation: use `DJANGO_TRUST_PROXY_SSL_HEADER=True` and `DRF_NUM_PROXIES=1`.
+Reconfirm those values if the request path or proxy/CDN changes.
+
 ## Runtime
 
 Use cPanel **Setup Python App**, Python **3.12**, application startup file
@@ -95,8 +104,15 @@ to hide a loop.
 Set `DJANGO_STATIC_ROOT` to an absolute `static` directory under the API domain's
 actual public document root. Set `DJANGO_MEDIA_ROOT` to a private directory
 outside all document roots. Only collected static assets are public. Student
-photo URLs remain the existing URL fields; there is currently no general file
-upload/download API. Do not expose private media with a public directory alias.
+photos now upload from a device and are served by the authenticated student
+photo endpoint. Install the updated requirements (including Pillow), make this
+private directory writable by Passenger, and include it in backups. Do not
+expose private media with a public directory alias.
+
+The application enables `STRICT_TRANS_TABLES` for each database connection,
+preserving other server SQL modes. If preflight reports `mysql.W002`, update
+`config/settings.py` from the current release before applying migrations;
+do not silence the warning or change the shared server’s global SQL mode.
 
 ## Controlled release
 
@@ -115,6 +131,7 @@ Before updating an existing database, create and verify a backup. Then:
 
 ```bash
 python manage.py migrate
+python manage.py load_advanced_subjects
 python manage.py createcachetable
 python manage.py collectstatic --noinput
 python manage.py createsuperuser
@@ -126,7 +143,12 @@ using cPanel's Python App controls after every code/environment change.
 
 Check HTTPS `/health/live/` (process) and `/health/ready/` (SQL plus cache),
 Django Admin styling, real-origin CORS/login/refresh/logout, each role's allowed
-read and denied cross-role read, and a result confirmation/report card.
+read and denied cross-role read, and a result confirmation/report card. Verify a
+device photo upload and authorized display, anonymous/unauthorized photo denial,
+receipt lookup, an opening balance, and automatic excess-payment allocation.
+The catalogue loader preserves existing papers; configure teaching allocations
+and paper definitions before enrollment. Review held legacy receipts against
+original historical enrollment/charges before releasing their credit.
 Readiness returns only `ok` or HTTP 503 `unavailable`, never configuration or
 school records. It is excluded from HTTP-to-HTTPS redirects for container
 compatibility; configure external monitors to use HTTPS explicitly.
@@ -172,3 +194,8 @@ synchronous unless a separate workflow design explicitly changes it.
 - [Python App configuration](https://www.namecheap.com/support/knowledgebase/article.aspx/10048/2182/how-to-work-with-python-app/)
 - [Shared-host resource/process restrictions](https://www.namecheap.com/support/knowledgebase/article.aspx/157/22/do-you-have-any-server-resource-restrictions/)
 - [Available server software](https://www.namecheap.com/support/knowledgebase/article.aspx/129/22/what-version-of-the-software-is-used-on-your-servers/)
+
+
+### O-Level catalogue update
+
+After installing the 2026-10-08 O-Level backend update and restarting the Python app, use **Load NCDC O-Level subjects** in the updated portal, or run `DJANGO_ENVIRONMENT=production python manage.py load_ordinary_subjects`. This is repeatable and preserves school configuration. Configure class-specific subject choices and papers separately; the menu does not enroll students. No migration or pip install is required for this update.

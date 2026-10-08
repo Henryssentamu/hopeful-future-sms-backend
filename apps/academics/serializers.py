@@ -25,7 +25,7 @@ class SubjectSerializer(serializers.ModelSerializer):
         model = Subject
         fields = [
             "id", "subject_code", "name", "o_level_type", "a_level_type",
-            "level", "status", "students_enrolled", "description", "papers",
+            "level", "status", "category", "students_enrolled", "description", "papers",
         ]
 
 

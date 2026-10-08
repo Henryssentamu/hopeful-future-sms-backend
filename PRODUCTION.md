@@ -94,7 +94,10 @@ Nginx error logs may contain request URLs and require restricted retention.
 
 The `media` named volume persists private files at `/app/media` across container
 replacement. Include it in backups. Do not use `docker compose down -v` on a
-real deployment. No public media alias or new file-upload API is introduced.
+real deployment. Student photos upload through the authenticated student API
+and are served through its scoped photo endpoint. Keep this volume writable
+by the runtime user, install Pillow through the updated requirements, and never
+expose a public media alias.
 
 `/health/live/` checks process responsiveness. `/health/ready/` checks SQL and a
 short-lived cache write/read/delete. Both return minimal uncached JSON and accept

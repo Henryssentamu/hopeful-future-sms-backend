@@ -47,6 +47,15 @@ class AssignmentType(models.TextChoices):
     OPTIONAL = "Optional", "Optional"
 
 
+class SubjectCategory(models.TextChoices):
+    SCIENCES = "Sciences", "Sciences"
+    ARTS = "Arts", "Arts"
+    LANGUAGES = "Languages", "Languages"
+    TECHNICAL = "Technical", "Technical / vocational"
+    GENERAL = "General", "General / cross-cutting"
+    UNCLASSIFIED = "Unclassified", "Unclassified"
+
+
 class Subject(models.Model):
     """
     `teachers`/`classes` string-list fields from the frontend's Subject type
@@ -57,6 +66,7 @@ class Subject(models.Model):
     legacy/unused duplicate and is dropped rather than ported.
     """
 
+    category = models.CharField(max_length=15, choices=SubjectCategory.choices, default=SubjectCategory.UNCLASSIFIED)
     subject_code = models.CharField(max_length=20, unique=True)
     name = models.CharField(max_length=100, unique=True)
     o_level_type = models.CharField(max_length=10, choices=SubjectTypeForLevel.choices)

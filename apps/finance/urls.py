@@ -1,3 +1,4 @@
+from .views import StudentFeeStatementView, OpeningBalanceViewSet, OpeningBalanceEvidenceViewSet
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
@@ -27,7 +28,11 @@ router.register("incomes", IncomeRecordViewSet, basename="income-record")
 router.register("requirements", SchoolRequirementViewSet, basename="school-requirement")
 router.register("requirement-records", StudentRequirementRecordViewSet, basename="requirement-record")
 
+router.register("opening-balances", OpeningBalanceViewSet, basename="opening-balance")
+router.register("opening-balance-evidence", OpeningBalanceEvidenceViewSet, basename="opening-balance-evidence")
+
 urlpatterns = [
+    path("students/<int:student_id>/statement/", StudentFeeStatementView.as_view(), name="student-fee-statement"),
     path("student-fee-status/", StudentFeeStatusView.as_view(), name="student-fee-status"),
     path("student-requirement-status/", StudentRequirementStatusView.as_view(), name="student-requirement-status"),
     path("overview/", FinanceOverviewView.as_view(), name="finance-overview"),

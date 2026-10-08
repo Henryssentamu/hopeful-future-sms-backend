@@ -8,7 +8,7 @@ from django.core.cache.backends.db import DatabaseCache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import OperationalError, connection
-from django.test import Client, SimpleTestCase, TransactionTestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from redis.exceptions import ConnectionError as RedisConnectionError
 from rest_framework.test import APIRequestFactory
 
@@ -317,3 +317,22 @@ class DatabaseCacheHostingTests(TransactionTestCase):
         first.num_requests = second.num_requests = 1
         self.assertTrue(first.allow_request(request, None))
         self.assertFalse(second.allow_request(request, None))
+
+
+class DatabaseStrictModeTests(TestCase):
+    def test_connection_initialization_enables_strict_mode_and_preserves_other_modes(self):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT @@SESSION.sql_mode")
+            original_mode = cursor.fetchone()[0]
+            try:
+                for initial_mode in ("", "NO_ENGINE_SUBSTITUTION"):
+                    with self.subTest(initial_mode=initial_mode):
+                        cursor.execute("SET SESSION sql_mode = %s", [initial_mode])
+                        cursor.execute(connection.settings_dict["OPTIONS"]["init_command"])
+                        cursor.execute("SELECT @@SESSION.sql_mode")
+                        modes = set(cursor.fetchone()[0].split(","))
+                        self.assertIn("STRICT_TRANS_TABLES", modes)
+                        if initial_mode:
+                            self.assertIn(initial_mode, modes)
+            finally:
+                cursor.execute("SET SESSION sql_mode = %s", [original_mode])

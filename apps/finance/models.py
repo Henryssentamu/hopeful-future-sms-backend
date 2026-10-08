@@ -1,3 +1,6 @@
+from uuid import uuid4
+
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
@@ -103,21 +106,79 @@ class StudentFeeAssignment(models.Model):
         return f"{self.student.name} — {self.term} {self.year}"
 
 
+def generate_receipt_number():
+    return f"HFSS-{uuid4().hex.upper()}"
+
+
+class StudentFeeAccount(models.Model):
+    """Frozen term charge or explicitly imported outstanding balance."""
+
+    student = models.ForeignKey(Student, on_delete=models.PROTECT, related_name="fee_accounts")
+    term = models.CharField(max_length=10, choices=FinanceTerm.choices)
+    year = models.PositiveIntegerField()
+    class_name = models.CharField(max_length=100)
+    level_group = models.CharField(max_length=10, choices=LevelGroup.choices)
+    amount_due = models.PositiveIntegerField()
+    source = models.CharField(max_length=15, choices=[("School fees", "School fees"), ("Opening balance", "Opening balance")])
+    charge_details = models.JSONField(default=list)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["student", "term", "year"], name="unique_student_fee_account")]
+        ordering = ["year", "term", "id"]
+
+
+class OpeningBalanceEvidence(models.Model):
+    """Pre-import evidence explains an opening balance without posting income twice."""
+
+    account = models.ForeignKey(StudentFeeAccount, on_delete=models.PROTECT, related_name="evidence")
+    kind = models.CharField(max_length=10, choices=[("Charge", "Charge"), ("Payment", "Payment")])
+    amount = models.PositiveIntegerField()
+    date = models.DateField()
+    reference = models.CharField(max_length=100, blank=True)
+    notes = models.TextField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+
+    class Meta:
+        ordering = ["date", "id"]
+
+
 class FeePayment(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="fee_payments")
+    student = models.ForeignKey(Student, on_delete=models.PROTECT, related_name="fee_payments")
     term = models.CharField(max_length=10, choices=FinanceTerm.choices)
     year = models.PositiveIntegerField()
     amount = models.PositiveIntegerField(help_text="UGX")
     date = models.DateField()
     method = models.CharField(max_length=15, choices=PaymentMethod.choices)
-    receipt_no = models.CharField(max_length=50, unique=True)
+    receipt_no = models.CharField(max_length=50, unique=True, default=generate_receipt_number, editable=False)
+    class_name = models.CharField(max_length=100, blank=True)
+    recorded_at = models.DateTimeField(auto_now_add=True, null=True)
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)
+    requires_reconciliation = models.BooleanField(default=False)
+    request_id = models.UUIDField(null=True, blank=True, unique=True)
     notes = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["-date"]
+        ordering = ["-date", "-id"]
 
     def __str__(self):
         return f"{self.receipt_no} — {self.student.name}: {self.amount}"
+
+
+class PaymentAllocation(models.Model):
+    payment = models.ForeignKey(FeePayment, on_delete=models.PROTECT, related_name="allocations")
+    account = models.ForeignKey(StudentFeeAccount, on_delete=models.PROTECT, related_name="allocations")
+    amount = models.PositiveIntegerField()
+    balance_after = models.PositiveIntegerField()
+    reason = models.CharField(max_length=30)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        constraints = [models.CheckConstraint(check=models.Q(amount__gt=0), name="positive_payment_allocation")]
 
 
 class ExpenditureCategory(models.Model):

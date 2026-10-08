@@ -69,6 +69,16 @@ class StudentAttendanceRecordSerializer(serializers.ModelSerializer):
 
 
 class StudentSerializer(serializers.ModelSerializer):
+    photo = serializers.FileField(source="photo_file", write_only=True, required=False)
+    has_photo = serializers.SerializerMethodField()
+
+    def get_has_photo(self, student):
+        return bool(student.photo_file)
+
+    def validate_photo(self, value):
+        from .photos import normalize_photo
+        return normalize_photo(value)
+
     class_name = serializers.CharField(source="school_class.name", read_only=True)
     level = serializers.CharField(read_only=True)
     parent_info = ParentInfoSerializer(read_only=True)
@@ -79,9 +89,9 @@ class StudentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "student_number", "name", "school_class", "class_name", "level", "combination",
             "performance", "email", "gender", "age", "religion", "location",
-            "enrollment_date", "photo_url", "parent_info", "subjects",
+            "enrollment_date", "photo_url", "has_photo", "photo", "parent_info", "subjects",
         ]
-        read_only_fields = ["performance"]
+        read_only_fields = ["performance", "photo_url"]
 
 
 class StudentFinanceSerializer(serializers.ModelSerializer):
@@ -96,6 +106,11 @@ class StudentFinanceSerializer(serializers.ModelSerializer):
 
 
 class StudentTeacherSerializer(serializers.ModelSerializer):
+    has_photo = serializers.SerializerMethodField()
+
+    def get_has_photo(self, student):
+        return bool(student.photo_file)
+
     """Academic student data needed for teaching, without family or contact details."""
 
     class_name = serializers.CharField(source="school_class.name", read_only=True)
@@ -106,7 +121,7 @@ class StudentTeacherSerializer(serializers.ModelSerializer):
         model = Student
         fields = [
             "id", "student_number", "name", "school_class", "class_name", "level",
-            "combination", "performance", "photo_url", "subjects",
+            "combination", "performance", "photo_url", "has_photo", "subjects",
         ]
 
     def get_subjects(self, student):

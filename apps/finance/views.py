@@ -1,4 +1,12 @@
-from rest_framework import permissions, viewsets
+from .ledger import account_rows, payment_credit, period_key, synchronize_accounts
+from .models import StudentFeeAccount, OpeningBalanceEvidence
+from .serializers import OpeningBalanceSerializer, OpeningBalanceEvidenceSerializer, FinancePeriodSerializer
+from django.shortcuts import get_object_or_404
+from django.db import transaction
+from apps.students.models import TermEnrollment
+from rest_framework import mixins, permissions, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -52,6 +60,24 @@ class FeeStructureViewSet(viewsets.ModelViewSet):
     permission_classes = [ReadAllWriteBursarOrAdmin]
     filterset_fields = ["level_group", "term", "year"]
 
+    @transaction.atomic
+    def perform_create(self, serializer):
+        structure = serializer.save()
+        for student_id in TermEnrollment.objects.filter(term=structure.term, year=structure.year,
+                school_class__level_group=structure.level_group, status="Enrolled").order_by("student_id").values_list("student_id", flat=True):
+            synchronize_accounts(student_id, self.request.user)
+
+    def perform_update(self, serializer):
+        structure = serializer.instance
+        if StudentFeeAccount.objects.filter(term=structure.term, year=structure.year, level_group=structure.level_group, source="School fees").exists():
+            raise ValidationError("This fee structure has posted student charges and cannot be changed retroactively.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if StudentFeeAccount.objects.filter(term=instance.term, year=instance.year, level_group=instance.level_group, source="School fees").exists():
+            raise ValidationError("This fee structure has posted charges and cannot be deleted.")
+        instance.delete()
+
 
 class FeeExtraViewSet(viewsets.ModelViewSet):
     queryset = FeeExtra.objects.select_related("fee_structure")
@@ -66,12 +92,25 @@ class StudentFeeAssignmentViewSet(viewsets.ModelViewSet):
     permission_classes = [ReadAllWriteBursarOrAdmin]
     filterset_fields = ["student", "term", "year"]
 
+    def perform_destroy(self, instance):
+        if StudentFeeAccount.objects.filter(student=instance.student, term=instance.term, year=instance.year).exists():
+            raise ValidationError("This fee assignment has posted charges and cannot be deleted.")
+        instance.delete()
 
-class FeePaymentViewSet(viewsets.ModelViewSet):
-    queryset = FeePayment.objects.select_related("student")
+
+class FeePaymentViewSet(mixins.CreateModelMixin, viewsets.ReadOnlyModelViewSet):
+    queryset = FeePayment.objects.select_related("student").prefetch_related("allocations__account")
     serializer_class = FeePaymentSerializer
     permission_classes = [ReadAllWriteBursarOrAdmin]
-    filterset_fields = ["student", "term", "year", "method"]
+    filterset_fields = ["student", "term", "year", "method", "receipt_no"]
+    search_fields = ["receipt_no", "student__student_number", "student__name"]
+
+    @action(detail=True, methods=["post"])
+    def reconcile(self, request, pk=None):
+        from .ledger import reconcile_legacy_payment
+        payment = self.get_object()
+        return Response(self.get_serializer(reconcile_legacy_payment(payment.pk, request.user)).data)
+
 
 
 class ExpenditureCategoryViewSet(viewsets.ModelViewSet):
@@ -118,41 +157,65 @@ class StudentFeeStatusView(APIView):
     permission_classes = [IsBursarOrAdmin]
 
     def get(self, request):
-        term = request.query_params.get("term", FinanceTerm.TERM_1)
-        year = int(request.query_params.get("year", 2025))
-        prev_term, prev_year = get_previous_term(term, year)
-
-        qs = Student.objects.select_related("school_class")
-        class_filter = request.query_params.get("class")
-        if class_filter:
-            qs = qs.filter(school_class__name=class_filter)
-
+        period = FinancePeriodSerializer(data=request.query_params)
+        period.is_valid(raise_exception=True)
+        term, year = period.validated_data["term"], period.validated_data["year"]
         rows = []
-        for student in qs:
-            due = student_due(student, term, year)
-            paid = paid_by_student(student, term, year)
-            status = payment_status(due, paid)
-            prev_due = student_due(student, prev_term, prev_year)
-            prev_paid = paid_by_student(student, prev_term, prev_year)
-            prev_balance = max(0, prev_due - prev_paid)
+        for student in Student.objects.select_related("school_class").prefetch_related("fee_accounts", "fee_payments"):
+            accounts = account_rows(student)
+            current = next((a for a in accounts if a["term"] == term and a["year"] == year), None)
+            due = current["due"] if current else 0
+            paid = current["paid"] if current else 0
+            credit = sum(payment_credit(p) for p in student.fee_payments.all())
+            previous = sum(a["balance"] for a in accounts if period_key(a["term"], a["year"]) < period_key(term, year))
+            enrollment = student.term_enrollments.filter(term=term, year=year).select_related("school_class").first()
+            school_class = enrollment.school_class if enrollment else student.school_class
             rows.append({
-                "student_id": student.id,
-                "student_number": student.student_number,
-                "name": student.name,
-                "class_name": student.school_class.name,
-                "due": due,
-                "paid": paid,
-                "balance": due - paid,
-                "status": status,
-                "prev_balance": prev_balance,
-                "enrolled": is_enrolled_for_term(student.id, term, year),
+                "student_id": student.pk, "student_number": student.student_number, "name": student.name,
+                "class_name": current["class_name"] if current else school_class.name, "level": school_class.level,
+                "due": due, "paid": paid, "balance": due - paid,
+                "status": "Overpaid" if credit and not previous and due == paid else payment_status(due, paid),
+                "prev_balance": previous, "credit": credit, "fee_configured": current is not None,
+                "enrolled": bool(enrollment and enrollment.status == "Enrolled"),
             })
-
-        status_filter = request.query_params.get("status")
-        if status_filter:
-            rows = [r for r in rows if r["status"] == status_filter]
-
+        for param, field in (("status", "status"), ("class", "class_name"), ("level", "level")):
+            if request.query_params.get(param):
+                rows = [r for r in rows if r[field] == request.query_params[param]]
         return Response(rows)
+
+
+class StudentFeeStatementView(APIView):
+    permission_classes = [IsBursarOrAdmin]
+
+    def get(self, request, student_id):
+        student = get_object_or_404(Student, pk=student_id)
+        accounts = account_rows(student)
+        evidence = OpeningBalanceEvidence.objects.filter(account__student=student)
+        payments = student.fee_payments.select_related("student").prefetch_related("allocations__account")
+        return Response({
+            "student_id": student.pk, "student_number": student.student_number, "name": student.name,
+            "accounts": accounts, "payments": FeePaymentSerializer(payments, many=True).data,
+            "evidence": OpeningBalanceEvidenceSerializer(evidence, many=True).data,
+            "total_balance": sum(a["balance"] for a in accounts),
+            "credit": sum(payment_credit(p) for p in payments),
+        })
+
+
+class OpeningBalanceViewSet(mixins.CreateModelMixin, viewsets.ReadOnlyModelViewSet):
+    queryset = StudentFeeAccount.objects.filter(source="Opening balance")
+    permission_classes = [IsBursarOrAdmin]
+    serializer_class = OpeningBalanceSerializer
+    filterset_fields = ["student", "term", "year"]
+
+
+class OpeningBalanceEvidenceViewSet(mixins.CreateModelMixin, viewsets.ReadOnlyModelViewSet):
+    queryset = OpeningBalanceEvidence.objects.select_related("account")
+    permission_classes = [IsBursarOrAdmin]
+    serializer_class = OpeningBalanceEvidenceSerializer
+    filterset_fields = ["account"]
+
+    def perform_create(self, serializer):
+        serializer.save(recorded_by=self.request.user)
 
 
 class FinanceOverviewView(APIView):
